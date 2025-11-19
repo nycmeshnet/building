@@ -3,6 +3,7 @@ import re
 import sys
 import os
 import csv
+import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from django.shortcuts import render
@@ -309,23 +310,42 @@ def fetch_all_installs(network_numbers):
                 installs.append(install)
     return installs
 
-def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map):
+def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
     """
     Helper function to process a single row of support data.
-    Returns a 'visit' dict or None if dates are invalid.
+    Returns a 'visit' dict or None if dates are invalid or match doesn't occur.
     """
-    # Parse Dates
-    try:
-        # Attempt standard US format first
-        date_reported = datetime.strptime(raw_date_reported, "%m/%d/%Y")
-        date_resolved = datetime.strptime(raw_date_resolved, "%m/%d/%Y")
-    except ValueError:
+    # Supported formats: US (MM/DD/YYYY), ISO (YYYY-MM-DD), ISO with time (YYYY-MM-DD HH:MM:SS)
+    formats = ["%m/%d/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"]
+    
+    date_reported = None
+    date_resolved = None
+
+    # Parse Date Reported
+    for fmt in formats:
         try:
-            # Fallback for other formats if necessary
-            date_reported = datetime.strptime(raw_date_reported, "%Y-%m-%d") 
-            date_resolved = datetime.strptime(raw_date_resolved, "%Y-%m-%d")
+            date_reported = datetime.strptime(raw_date_reported, fmt)
+            break
         except ValueError:
-            return None # Skip invalid date rows
+            pass
+    
+    # Parse Date Resolved (might be empty)
+    if raw_date_resolved:
+        for fmt in formats:
+            try:
+                date_resolved = datetime.strptime(raw_date_resolved, fmt)
+                break
+            except ValueError:
+                pass
+
+    if not date_reported or not date_resolved:
+        return None # Skip invalid date rows
+
+    # --- FILTERING LOGIC ---
+    if filter_year and filter_month:
+        if date_reported.year != filter_year or date_reported.month != filter_month:
+            return None
+    # -----------------------
 
     wait = (date_resolved - date_reported).days
 
@@ -663,15 +683,17 @@ def reports(request):
                     if not row: continue
                     
                     # CSV format expected:
-                    # 0: Unit, 1: Issue, 2: Reported, 3: Resolved
-                    unit = row[0]
-                    issue = row[1]
-                    raw_date_reported = row[2]
-                    raw_date_resolved = row[3]
+                    # 0: ID, 1: Apt, 2: Issue, 3: Reported By, 4: Reported, 5: Resolved
+                    # (Assuming User's provided CSV structure)
+                    unit = row[1]
+                    issue = row[2]
+                    raw_date_reported = row[4]
+                    raw_date_resolved = row[5]
 
                     visit = process_support_row(
                         unit, issue, raw_date_reported, raw_date_resolved, 
-                        all_active_installs, install_to_building_map
+                        all_active_installs, install_to_building_map,
+                        current_year, current_month # PASSING FILTER DATES
                     )
 
                     if visit:
@@ -695,7 +717,7 @@ def reports(request):
                     lines = response.content.decode('utf-8').splitlines()
                     reader = csv.reader(lines)
                     
-                    # Skip Header (Assuming the Google Sheet has a header row)
+                    # Skip Header
                     next(reader) 
 
                     for row in reader:
@@ -710,7 +732,8 @@ def reports(request):
 
                         visit = process_support_row(
                             unit, issue, raw_date_reported, raw_date_resolved, 
-                            all_active_installs, install_to_building_map
+                            all_active_installs, install_to_building_map,
+                            current_year, current_month # PASSING FILTER DATES
                         )
 
                         if visit:
