@@ -65,9 +65,13 @@
                     </select>
                 </div>
                 <div class="col">
+                    <button type="submit" name="action" value="generate" class="btn btn-secondary mb-2">Generate</button>
+                    
                     <input type="file" name="file" id="fileInput" style="display: none;">
-                    <button type="submit" class="btn btn-secondary mb-2">Generate</button>
-                    <button type="button" class="btn btn-secondary mb-2" id="uploadButton">Generate with Support</button>
+                    <button type="button" class="btn btn-secondary mb-2" id="uploadButton">Generate with CSV File</button>
+
+                    <button type="submit" name="action" value="google_sheets" class="btn btn-success mb-2" style="background-color: #0f9d58; border-color: #0f9d58; color: white;">Generate with Google Sheets</button>
+
                     {% if report %}
                       <button type="button" class="btn btn-warning mb-2" onclick="printReport()">Print Report</button>
                     {% endif %}
@@ -216,7 +220,7 @@
                       <tr>
                         <th>Total Visits: {{ stats.visits }}</th>
                         <th>% Mesh: {{ stats.percent_mesh }}%</th>
-                        <th>% Internet: {{ stats.percent_mesh }}%</th>
+                        <th>% Internet: {{ stats.percent_internet }}%</th>
                         <th></th>
                         <th>Average Wait:</th>
                         <th>{{ stats.avg_wait }} Days</th>
