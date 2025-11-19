@@ -3,6 +3,9 @@ import re
 import sys
 import os
 import csv
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from django.shortcuts import render
@@ -308,6 +311,61 @@ def fetch_all_installs(network_numbers):
                 installs.append(install)
     return installs
 
+def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map):
+    """
+    Helper function to process a single row of support data.
+    Returns a 'visit' dict or None if dates are invalid.
+    """
+    # Parse Dates
+    try:
+        # Attempt standard US format first
+        date_reported = datetime.strptime(raw_date_reported, "%m/%d/%Y")
+        date_resolved = datetime.strptime(raw_date_resolved, "%m/%d/%Y")
+    except ValueError:
+        try:
+            # Fallback for other formats if necessary
+            date_reported = datetime.strptime(raw_date_reported, "%Y-%m-%d") 
+            date_resolved = datetime.strptime(raw_date_resolved, "%Y-%m-%d")
+        except ValueError:
+            return None # Skip invalid date rows
+
+    wait = (date_resolved - date_reported).days
+
+    # Determine Mesh Status
+    mesh = False
+    building = "0"
+    apt = unit
+    
+    if '-' in unit:
+        building = unit.split('-')[0]
+        apt = unit.split('-')[1]
+    
+    nn = 0
+    for install in all_active_installs:
+        # Map building number to network number
+        for k, v in install_to_building_map.items():
+            if v == int(building):
+                nn = k
+                break
+        
+        # Check if this install matches the unit
+        try:
+            if int(install["node"]["network_number"]) == nn:
+                if install["unit"] == apt:
+                    mesh = True
+                    break
+        except (KeyError, ValueError):
+            continue
+
+    return {
+        "unit": unit,
+        "mesh": mesh,
+        "issue": issue,
+        "date_reported": date_reported.strftime("%m/%d/%Y"),
+        "date_resolved": date_resolved.strftime("%m/%d/%Y"),
+        "wait": wait
+    }
+
 @login_required
 def index(request):
     results = None
@@ -330,7 +388,7 @@ def index(request):
                 if selected_member_info:
                     subscription_info = fetch_subscription_info(selected_member_info)
                     for onu in uisp:
-                        raise Exception(onu['name'], selected_member_info['unit'])
+                        # raise Exception(onu['name'], selected_member_info['unit'])
                         if onu['name'] == selected_member_info['unit']:
                             device_info = onu
                             break
@@ -430,9 +488,11 @@ def reports(request):
     support = []
     stats = {}
     if request.method == 'POST':
-        form = ReportForm(request.POST)
+        form = ReportForm(request.POST, request.FILES)
         if form.is_valid():
             value = form.cleaned_data['report']
+            action = request.POST.get('action')
+
             formatted = None
             for month in months:
                 if month['value'] == value:
@@ -550,9 +610,13 @@ def reports(request):
                 response_meanwait += wait
                 if wait > 7:
                     response_weekwait += 1
-            response_meanwait = round(response_meanwait / len(current_installs), 2)
-            response_shortwait = len(current_installs) - response_weekwait
-            response_percent = int((response_shortwait / len(current_installs)) * 100)
+            if len(current_installs) > 0:
+                response_meanwait = round(response_meanwait / len(current_installs), 2)
+                response_shortwait = len(current_installs) - response_weekwait
+                response_percent = int((response_shortwait / len(current_installs)) * 100)
+            else:
+                response_shortwait = 0
+                response_percent = 0
 
             # Build the report dictionary
             report = {
@@ -581,53 +645,93 @@ def reports(request):
                 "response_percent": response_percent
             }
 
-            if request.FILES:
-                mesh_count = 0
-                internet_count = 0
-                avg_wait = 0
+            # ---------------------------------------------------------
+            #  SUPPORT DATA HANDLING (File Upload OR Google Sheets)
+            # ---------------------------------------------------------
+            
+            mesh_count = 0
+            internet_count = 0
+            avg_wait = 0
 
+            # OPTION A: File Upload (CSV)
+            # ---------------------------
+            if request.FILES:
                 support_file = request.FILES['file'].read().decode("utf-8-sig")
                 lines = support_file.splitlines()
                 reader = csv.reader(lines, delimiter=',')
-                next(reader)
+                next(reader) # Skip header
+
                 for row in reader:
-                    unit = row[0]
-                    building = unit.split('-')[0]
-                    nn = 0
-                    apt = unit.split('-')[1]
-                    mesh = False
-
-                    for install in all_active_installs:
-                        for k,v in install_to_building_map.items():
-                            if v == int(building):
-                                nn = k
-                                break
-                        if int(install["node"]["network_number"]) == nn:
-                            if install["unit"] == apt:
-                                mesh = True
-                                mesh_count += 1
-                                break
-                            
-                    issue = row[1]
-                    if issue == "Internet":
-                        internet_count += 1
-
-                    date_reported = datetime.strptime(row[2], "%m/%d/%Y")
-                    date_resolved = datetime.strptime(row[3], "%m/%d/%Y")
-                    wait = (date_resolved - date_reported).days
-                    avg_wait += wait
+                    if not row: continue
                     
-                    visit = {
-                        "unit": unit,
-                        "mesh": mesh,
-                        "issue": issue,
-                        "date_reported": date_reported.strftime("%m/%d/%Y"),
-                        "date_resolved": date_resolved.strftime("%m/%d/%Y"),
-                        "wait": wait
-                    }
+                    # CSV format expected:
+                    # 0: Unit, 1: Issue, 2: Reported, 3: Resolved
+                    unit = row[0]
+                    issue = row[1]
+                    raw_date_reported = row[2]
+                    raw_date_resolved = row[3]
 
-                    support.append(visit)
+                    visit = process_support_row(
+                        unit, issue, raw_date_reported, raw_date_resolved, 
+                        all_active_installs, install_to_building_map
+                    )
 
+                    if visit:
+                        support.append(visit)
+                        if visit['mesh']: mesh_count += 1
+                        if visit['issue'] == "Internet": internet_count += 1
+                        avg_wait += visit['wait']
+
+            # OPTION B: Google Sheets (ENV VAR AUTH)
+            # -----------------------
+            elif action == 'google_sheets':
+                try:
+                    # Authenticate using Environment Variable
+                    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+                    
+                    creds_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+                    if not creds_json_str:
+                        raise Exception("Missing GOOGLE_CREDENTIALS_JSON environment variable")
+
+                    # Load dict from string
+                    creds_dict = json.loads(creds_json_str)
+                    
+                    # Create credentials object from dict
+                    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+                    client = gspread.authorize(creds)
+
+                    # Open Sheet
+                    sheet = client.open('GSG Support Tickets').sheet1
+                    rows = sheet.get_all_values()
+                    data_rows = rows[1:] # Skip header
+
+                    for row in data_rows:
+                        if not row or not row[0]: continue
+                        
+                        # Google Sheet format expected:
+                        # 0: ID, 1: Apt, 2: Issue, 3: Reported By, 4: Reported, 5: Resolved
+                        unit = row[1]
+                        issue = row[2]
+                        raw_date_reported = row[4]
+                        raw_date_resolved = row[5]
+
+                        visit = process_support_row(
+                            unit, issue, raw_date_reported, raw_date_resolved, 
+                            all_active_installs, install_to_building_map
+                        )
+
+                        if visit:
+                            support.append(visit)
+                            if visit['mesh']: mesh_count += 1
+                            if visit['issue'] == "Internet": internet_count += 1
+                            avg_wait += visit['wait']
+                            
+                except Exception as e:
+                    print(f"Error connecting to Google Sheets: {e}")
+                    # Optional: Add an error message to 'report' or 'stats' to display in UI
+
+            # Calculate Statistics if support data exists
+            if len(support) > 0:
                 stats = {
                     "visits": len(support),
                     "percent_mesh": int((mesh_count / len(support)) * 100),
@@ -681,7 +785,7 @@ def billing(request):
                     installed.append(new_install)
                     install['apt'] = new_install
                     month_installs.append(install)
-      
+       
         months.append({
             'value': start_date.strftime("%Y%m"),
             'formatted': start_date.strftime("%B %Y"),
