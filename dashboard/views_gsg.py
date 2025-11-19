@@ -313,50 +313,66 @@ def fetch_all_installs(network_numbers):
 def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
     """
     Helper function to process a single row of support data.
-    Returns a 'visit' dict or None if dates are invalid or match doesn't occur.
+    Handles standard dates, dates with times, and empty 'Resolved' dates.
     """
-    # Supported formats: US (MM/DD/YYYY), ISO (YYYY-MM-DD), ISO with time (YYYY-MM-DD HH:MM:SS)
-    formats = ["%m/%d/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"]
+    # 1. Clean up the inputs
+    raw_date_reported = raw_date_reported.strip()
+    raw_date_resolved = raw_date_resolved.strip() if raw_date_resolved else ""
+
+    # 2. Define supported formats
+    # We check "ISO with time" first, then "ISO", then "US"
+    formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y"]
     
     date_reported = None
     date_resolved = None
 
-    # Parse Date Reported
+    # 3. Parse Date Reported
     for fmt in formats:
         try:
-            date_reported = datetime.strptime(raw_date_reported, fmt)
+            # Try to parse. If the string is longer than the format (e.g. has milliseconds), 
+            # we might need to substring it, but usually strptime is strict.
+            # A simple hack for milliseconds: split by '.'
+            clean_date = raw_date_reported.split('.')[0] 
+            date_reported = datetime.strptime(clean_date, fmt)
             break
         except ValueError:
             pass
     
-    # Parse Date Resolved (might be empty)
+    if not date_reported:
+        return None # Cannot process a ticket without a reported date
+
+    # 4. Filter by Month (If filter is active)
+    if filter_year and filter_month:
+        if date_reported.year != filter_year or date_reported.month != filter_month:
+            return None
+
+    # 5. Parse Date Resolved
     if raw_date_resolved:
         for fmt in formats:
             try:
-                date_resolved = datetime.strptime(raw_date_resolved, fmt)
+                clean_date = raw_date_resolved.split('.')[0]
+                date_resolved = datetime.strptime(clean_date, fmt)
                 break
             except ValueError:
                 pass
 
-    if not date_reported or not date_resolved:
-        return None # Skip invalid date rows
+    # 6. Calculate Wait Time
+    if date_resolved:
+        wait = (date_resolved - date_reported).days
+    else:
+        # If not resolved yet, calculate wait time relative to NOW
+        wait = (datetime.now() - date_reported).days
 
-    # --- FILTERING LOGIC ---
-    if filter_year and filter_month:
-        if date_reported.year != filter_year or date_reported.month != filter_month:
-            return None
-    # -----------------------
-
-    wait = (date_resolved - date_reported).days
-
-    # Determine Mesh Status
+    # 7. Determine Mesh Status
     mesh = False
     building = "0"
     apt = unit
     
     if '-' in unit:
-        building = unit.split('-')[0]
-        apt = unit.split('-')[1]
+        parts = unit.split('-')
+        if len(parts) >= 2:
+            building = parts[0].strip()
+            apt = parts[1].strip()
     
     nn = 0
     for install in all_active_installs:
@@ -369,18 +385,22 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
         # Check if this install matches the unit
         try:
             if int(install["node"]["network_number"]) == nn:
-                if install["unit"] == apt:
+                # Case insensitive check for unit letter (e.g. 14D vs 14d)
+                if install["unit"].lower() == apt.lower():
                     mesh = True
                     break
         except (KeyError, ValueError):
             continue
+
+    # 8. Format dates for display (Handle empty resolved date)
+    display_resolved = date_resolved.strftime("%m/%d/%Y") if date_resolved else "Open"
 
     return {
         "unit": unit,
         "mesh": mesh,
         "issue": issue,
         "date_reported": date_reported.strftime("%m/%d/%Y"),
-        "date_resolved": date_resolved.strftime("%m/%d/%Y"),
+        "date_resolved": display_resolved,
         "wait": wait
     }
 
@@ -505,11 +525,19 @@ def reports(request):
     report = {}
     support = []
     stats = {}
+    error_message = None # New variable to pass errors to template
+
     if request.method == 'POST':
         form = ReportForm(request.POST, request.FILES)
+        
+        # Debugging Print
+        print(f"DEBUG: Form is valid: {form.is_valid()}", file=sys.stderr)
+        
         if form.is_valid():
             value = form.cleaned_data['report']
             action = request.POST.get('action')
+            
+            print(f"DEBUG: Action received: {action}", file=sys.stderr)
 
             formatted = None
             for month in months:
@@ -674,6 +702,7 @@ def reports(request):
             # OPTION A: File Upload (CSV)
             # ---------------------------
             if request.FILES:
+                print("DEBUG: Processing File Upload", file=sys.stderr)
                 support_file = request.FILES['file'].read().decode("utf-8-sig")
                 lines = support_file.splitlines()
                 reader = csv.reader(lines, delimiter=',')
@@ -683,17 +712,17 @@ def reports(request):
                     if not row: continue
                     
                     # CSV format expected:
-                    # 0: ID, 1: Apt, 2: Issue, 3: Reported By, 4: Reported, 5: Resolved
+                    # 0: Unit, 1: Issue, 2: Reported, 3: Resolved
                     # (Assuming User's provided CSV structure)
-                    unit = row[1]
-                    issue = row[2]
-                    raw_date_reported = row[4]
-                    raw_date_resolved = row[5]
+                    unit = row[0]
+                    issue = row[1]
+                    raw_date_reported = row[2]
+                    raw_date_resolved = row[3]
 
                     visit = process_support_row(
                         unit, issue, raw_date_reported, raw_date_resolved, 
                         all_active_installs, install_to_building_map,
-                        current_year, current_month # PASSING FILTER DATES
+                        current_year, current_month
                     )
 
                     if visit:
@@ -705,10 +734,13 @@ def reports(request):
             # OPTION B: Google Sheets (SIMPLE PUBLISHED CSV)
             # -----------------------
             elif action == 'google_sheets':
+                print("DEBUG: Processing Google Sheets", file=sys.stderr)
                 try:
                     if not GOOGLE_SHEET_CSV_URL:
                         raise Exception("Missing GOOGLE_SHEET_CSV_URL environment variable")
                     
+                    print(f"DEBUG: Fetching {GOOGLE_SHEET_CSV_URL}", file=sys.stderr)
+
                     # Download the published CSV
                     response = requests.get(GOOGLE_SHEET_CSV_URL)
                     response.raise_for_status() # Raise error if download failed
@@ -733,7 +765,7 @@ def reports(request):
                         visit = process_support_row(
                             unit, issue, raw_date_reported, raw_date_resolved, 
                             all_active_installs, install_to_building_map,
-                            current_year, current_month # PASSING FILTER DATES
+                            current_year, current_month
                         )
 
                         if visit:
@@ -741,10 +773,9 @@ def reports(request):
                             if visit['mesh']: mesh_count += 1
                             if visit['issue'] == "Internet": internet_count += 1
                             avg_wait += visit['wait']
-                            
                 except Exception as e:
-                    print(f"Error connecting to Google Sheets: {e}")
-                    # Optional: Add an error message to 'report' or 'stats' to display in UI
+                    error_message = f"Error connecting to Google Sheets: {e}"
+                    print(error_message, file=sys.stderr)
 
             # Calculate Statistics if support data exists
             if len(support) > 0:
@@ -755,11 +786,14 @@ def reports(request):
                     "avg_wait": round(avg_wait / len(support), 2)
                 }
     
+    # NOTE: We are passing 'error_message' to the template. 
+    # Ensure your template can display {{ error_message }} if it's not None.
     return render(request, 'dashboard/gsg-reports.html', {
         'months': months,
         'report': report,
         'support': support,
-        'stats': stats
+        'stats': stats,
+        'error_message': error_message 
     })
 
 @login_required
