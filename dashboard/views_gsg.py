@@ -3,9 +3,6 @@ import re
 import sys
 import os
 import csv
-import json
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from django.shortcuts import render
@@ -28,6 +25,7 @@ MESHDB_API_KEY = os.environ.get("MESHDB_API_KEY","")
 UISP_API_KEY = os.environ.get("UISP_API_KEY", "")
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
 NINJA_API_KEY = os.environ.get("NINJA_API_KEY", "")
+GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "")
 
 headers = {
     'accept': 'application/json',
@@ -682,30 +680,25 @@ def reports(request):
                         if visit['issue'] == "Internet": internet_count += 1
                         avg_wait += visit['wait']
 
-            # OPTION B: Google Sheets (ENV VAR AUTH)
+            # OPTION B: Google Sheets (SIMPLE PUBLISHED CSV)
             # -----------------------
             elif action == 'google_sheets':
                 try:
-                    # Authenticate using Environment Variable
-                    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+                    if not GOOGLE_SHEET_CSV_URL:
+                        raise Exception("Missing GOOGLE_SHEET_CSV_URL environment variable")
                     
-                    creds_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-                    if not creds_json_str:
-                        raise Exception("Missing GOOGLE_CREDENTIALS_JSON environment variable")
-
-                    # Load dict from string
-                    creds_dict = json.loads(creds_json_str)
+                    # Download the published CSV
+                    response = requests.get(GOOGLE_SHEET_CSV_URL)
+                    response.raise_for_status() # Raise error if download failed
                     
-                    # Create credentials object from dict
-                    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-                    client = gspread.authorize(creds)
+                    # Decode the bytes to string and split into lines
+                    lines = response.content.decode('utf-8').splitlines()
+                    reader = csv.reader(lines)
+                    
+                    # Skip Header (Assuming the Google Sheet has a header row)
+                    next(reader) 
 
-                    # Open Sheet
-                    sheet = client.open('GSG Support Tickets').sheet1
-                    rows = sheet.get_all_values()
-                    data_rows = rows[1:] # Skip header
-
-                    for row in data_rows:
+                    for row in reader:
                         if not row or not row[0]: continue
                         
                         # Google Sheet format expected:
