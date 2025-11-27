@@ -530,14 +530,9 @@ def reports(request):
     if request.method == 'POST':
         form = ReportForm(request.POST, request.FILES)
         
-        # Debugging Print
-        print(f"DEBUG: Form is valid: {form.is_valid()}", file=sys.stderr)
-        
         if form.is_valid():
             value = form.cleaned_data['report']
             action = request.POST.get('action')
-            
-            print(f"DEBUG: Action received: {action}", file=sys.stderr)
 
             formatted = None
             for month in months:
@@ -702,7 +697,6 @@ def reports(request):
             # OPTION A: File Upload (CSV)
             # ---------------------------
             if request.FILES:
-                print("DEBUG: Processing File Upload", file=sys.stderr)
                 support_file = request.FILES['file'].read().decode("utf-8-sig")
                 lines = support_file.splitlines()
                 reader = csv.reader(lines, delimiter=',')
