@@ -4,6 +4,7 @@ import sys
 import os
 import csv
 import json
+from dateutil import parser
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from django.shortcuts import render
@@ -311,88 +312,67 @@ def fetch_all_installs(network_numbers):
     return installs
 
 def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
-    """
-    Helper function to process a single row of support data.
-    Handles standard dates, dates with times, and empty 'Resolved' dates.
-    """
-    # 1. Clean up the inputs
+    if not raw_date_reported:
+        return None
+
+    # Clean whitespace and unexpected spaces
+    unit = unit.strip().replace(" ", "")
+    issue = issue.strip()
     raw_date_reported = raw_date_reported.strip()
     raw_date_resolved = raw_date_resolved.strip() if raw_date_resolved else ""
 
-    # 2. Define supported formats
-    # We check "ISO with time" first, then "ISO", then "US"
-    formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y"]
-    
-    date_reported = None
-    date_resolved = None
+    # Parse Date Reported
+    try:
+        date_reported = parser.parse(raw_date_reported)
+    except Exception:
+        return None
 
-    # 3. Parse Date Reported
-    for fmt in formats:
-        try:
-            # Try to parse. If the string is longer than the format (e.g. has milliseconds), 
-            # we might need to substring it, but usually strptime is strict.
-            # A simple hack for milliseconds: split by '.'
-            clean_date = raw_date_reported.split('.')[0] 
-            date_reported = datetime.strptime(clean_date, fmt)
-            break
-        except ValueError:
-            pass
-    
-    if not date_reported:
-        return None # Cannot process a ticket without a reported date
-
-    # 4. Filter by Month (If filter is active)
+    # Filter by month and year
     if filter_year and filter_month:
         if date_reported.year != filter_year or date_reported.month != filter_month:
             return None
 
-    # 5. Parse Date Resolved
+    # Parse Date Resolved if present
+    date_resolved = None
     if raw_date_resolved:
-        for fmt in formats:
-            try:
-                clean_date = raw_date_resolved.split('.')[0]
-                date_resolved = datetime.strptime(clean_date, fmt)
-                break
-            except ValueError:
-                pass
+        try:
+            date_resolved = parser.parse(raw_date_resolved)
+        except Exception:
+            date_resolved = None
 
-    # 6. Calculate Wait Time
+    # Calculate wait time
     if date_resolved:
         wait = (date_resolved - date_reported).days
     else:
-        # If not resolved yet, calculate wait time relative to NOW
         wait = (datetime.now() - date_reported).days
 
-    # 7. Determine Mesh Status
+    # Mesh detection
     mesh = False
     building = "0"
     apt = unit
-    
-    if '-' in unit:
-        parts = unit.split('-')
+
+    if "-" in unit:
+        parts = unit.split("-")
         if len(parts) >= 2:
-            building = parts[0].strip()
-            apt = parts[1].strip()
-    
+            building = parts[0]
+            apt = parts[1]
+
     nn = 0
     for install in all_active_installs:
-        # Map building number to network number
         for k, v in install_to_building_map.items():
             if v == int(building):
                 nn = k
                 break
-        
-        # Check if this install matches the unit
+
         try:
             if int(install["node"]["network_number"]) == nn:
-                # Case insensitive check for unit letter (e.g. 14D vs 14d)
                 if install["unit"].lower() == apt.lower():
                     mesh = True
                     break
-        except (KeyError, ValueError):
+        except Exception:
             continue
 
-    # 8. Format dates for display (Handle empty resolved date)
+    # Format output
     display_resolved = date_resolved.strftime("%m/%d/%Y") if date_resolved else "Open"
 
     return {
