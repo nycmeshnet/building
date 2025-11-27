@@ -62,3 +62,5 @@ jobs:
             --set building.ninja_api_key="${{ secrets.NINJA_API_KEY }}" \
             --set building.oidc_rp_client_id="${{ secrets.OIDC_RP_CLIENT_ID }}" \
             --set building.oidc_rp_client_secret="${{ secrets.OIDC_RP_CLIENT_SECRET }}"
+            --set building.google_sheet_csv_url="${{ secrets.GOOGLE_SHEET_CSV_URL }}"
+            
