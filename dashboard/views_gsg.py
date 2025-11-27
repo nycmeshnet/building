@@ -314,6 +314,8 @@ def fetch_all_installs(network_numbers):
 def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
     if not raw_date_reported:
         return None
+    else:
+        print(f"Processing support for: {unit}", file=sys.stderr)
 
     # Clean whitespace and unexpected spaces
     unit = unit.strip().replace(" ", "")
@@ -324,7 +326,8 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
     # Parse Date Reported
     try:
         date_reported = parser.parse(raw_date_reported)
-    except Exception:
+    except Exception as e:
+        print(e)
         return None
 
     # Filter by month and year
@@ -369,7 +372,8 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
                 if install["unit"].lower() == apt.lower():
                     mesh = True
                     break
-        except Exception:
+        except Exception as e:
+            print(e)
             continue
 
     # Format output
