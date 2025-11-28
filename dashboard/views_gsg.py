@@ -327,7 +327,7 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
     try:
         date_reported = parser.parse(raw_date_reported)
     except Exception as e:
-        print(e)
+        print(e, file=sys.stderr)
         return None
 
     # Filter by month and year
@@ -373,7 +373,7 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
                     mesh = True
                     break
         except Exception as e:
-            print(e)
+            print(e, file=sys.stderr)
             continue
 
     # Format output
@@ -763,6 +763,8 @@ def reports(request):
                     "percent_internet": int((internet_count / len(support)) * 100),
                     "avg_wait": round(avg_wait / len(support), 2)
                 }
+            else:
+                error_message = "Support var is empty!"
     
     # NOTE: We are passing 'error_message' to the template. 
     # Ensure your template can display {{ error_message }} if it's not None.
