@@ -311,7 +311,7 @@ def fetch_all_installs(network_numbers):
                 installs.append(install)
     return installs
 
-def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
+def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year, filter_month):
     if not raw_date_reported:
         return None
     else:
@@ -331,9 +331,9 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
         return None
 
     # Filter by month and year
-    if filter_year and filter_month:
-        if date_reported.year != filter_year or date_reported.month != filter_month:
-            return None
+    if date_reported.year != filter_year or date_reported.month != filter_month:
+        print(f"filter_year: {filter_year}, filter_month: {filter_month}, date_reported.year: {date_reported.year}, date_reported.month: {date_reported.month}", file=sys.stderr)
+        return None
 
     # Parse Date Resolved if present
     date_resolved = None
