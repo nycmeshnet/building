@@ -63,6 +63,15 @@ install_to_unit_map = {
 }
 alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
+internet_keywords = [
+    "internet",
+    "wifi",
+    "loco",
+    "onu",
+    "connection",
+    "fiber"
+]
+
 def normalize_phone_number(phone):
     phone = phone.strip()
     if len(phone) == 10:
@@ -698,8 +707,10 @@ def reports(request):
                     if visit:
                         support.append(visit)
                         if visit['mesh']: mesh_count += 1
-                        if visit['issue'] == "Internet": internet_count += 1
                         avg_wait += visit['wait']
+                        issue_text = visit["issue"].lower()
+                        if any(keyword in issue_text for keyword in internet_keywords):
+                            internet_count += 1
 
             # OPTION B: Google Sheets (SIMPLE PUBLISHED CSV)
             # -----------------------
@@ -738,8 +749,10 @@ def reports(request):
                         if visit:
                             support.append(visit)
                             if visit['mesh']: mesh_count += 1
-                            if visit['issue'] == "Internet": internet_count += 1
                             avg_wait += visit['wait']
+                            issue_text = visit["issue"].lower()
+                            if any(keyword in issue_text for keyword in internet_keywords):
+                                internet_count += 1
                             
                 except Exception as e:
                     error_message = f"Error connecting to Google Sheets: {e}"
