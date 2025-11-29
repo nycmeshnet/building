@@ -752,7 +752,7 @@ def reports(request):
                             if visit['issue'] == "Internet": internet_count += 1
                             avg_wait += visit['wait']
                         else:
-                            error_message = "DEBUG: Visit not valid!"
+                            print("DEBUG: Visit not valid!", file=sys.stderr)
                             
                 except Exception as e:
                     error_message = f"Error connecting to Google Sheets: {e}"
