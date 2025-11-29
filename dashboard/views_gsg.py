@@ -528,8 +528,8 @@ def reports(request):
             all_active_installs = []
 
             # Parse the year and month from the value
-            current_year = int(value[:4])
-            current_month = int(value[4:])
+            selected_year = current_year = int(value[:4])
+            selected_month = current_month = int(value[4:])
             current_date = datetime(current_year, current_month, 1)
 
             # Generate the date ranges and formatted month names
@@ -700,7 +700,7 @@ def reports(request):
                     visit = process_support_row(
                         unit, issue, raw_date_reported, raw_date_resolved, 
                         all_active_installs, install_to_building_map,
-                        current_year, current_month
+                        selected_year, selected_month
                     )
 
                     if visit:
@@ -743,7 +743,7 @@ def reports(request):
                         visit = process_support_row(
                             unit, issue, raw_date_reported, raw_date_resolved, 
                             all_active_installs, install_to_building_map,
-                            current_year, current_month
+                            selected_year, selected_month
                         )
 
                         if visit:
