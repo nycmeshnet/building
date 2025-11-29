@@ -751,9 +751,11 @@ def reports(request):
                             if visit['mesh']: mesh_count += 1
                             if visit['issue'] == "Internet": internet_count += 1
                             avg_wait += visit['wait']
+                        else:
+                            error_message = "DEBUG: Visit not valid!"
+                            
                 except Exception as e:
                     error_message = f"Error connecting to Google Sheets: {e}"
-                    print(error_message, file=sys.stderr)
 
             # Calculate Statistics if support data exists
             if len(support) > 0:
