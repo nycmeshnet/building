@@ -78,7 +78,6 @@ def get_install_unit_and_network_number(install_id, headers):
         return None, None
 
 def get_device_data(parent_id):
-    print(parent_id, file=sys.stderr)
     headers = {
         'accept': 'application/json',
         'x-auth-token': f'{UISP_API_KEY}'
@@ -87,7 +86,6 @@ def get_device_data(parent_id):
     response = requests.get(url, headers=headers, verify=False)
 
     full_url = response.url
-    print(f"UISP URL: {full_url}", file=sys.stderr)
 
     if response.status_code == 200:
         return response.json()
@@ -148,7 +146,6 @@ def fetch_ninja_client(building_apt):
     )
 
     full_url = response.url
-    print(f"Ninja Client URL: {full_url}", file=sys.stderr)
 
     if response.status_code == 200:
         data = response.json()
@@ -164,7 +161,6 @@ def fetch_ninja_invoices(client_id):
     )
 
     full_url = response.url
-    print(f"Ninja Invoice URL: {full_url}", file=sys.stderr)
 
     if response.status_code == 200:
         data = response.json()
@@ -185,7 +181,6 @@ def fetch_ninja_invoices(client_id):
 def fetch_uisp_info():
     devices = []
     for nn in DEVICE_PARENT_IDS:
-        print(nn, file=sys.stderr)
         device_data = get_device_data(DEVICE_PARENT_IDS[nn])
         if device_data:
             for d in device_data:
@@ -311,11 +306,9 @@ def fetch_all_installs(network_numbers):
                 installs.append(install)
     return installs
 
-def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year, filter_month):
+def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
     if not raw_date_reported:
         return None
-    else:
-        print(f"Processing support for: {unit}", file=sys.stderr)
 
     # Clean whitespace and unexpected spaces
     unit = unit.strip().replace(" ", "")
@@ -331,9 +324,9 @@ def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_a
         return None
 
     # Filter by month and year
-    if date_reported.year != filter_year or date_reported.month != filter_month:
-        print(f"filter_year: {filter_year}, filter_month: {filter_month}, date_reported.year: {date_reported.year}, date_reported.month: {date_reported.month}", file=sys.stderr)
-        return None
+    if filter_year and filter_month:
+        if date_reported.year != filter_year or date_reported.month != filter_month:
+            return None
 
     # Parse Date Resolved if present
     date_resolved = None
@@ -699,8 +692,7 @@ def reports(request):
 
                     visit = process_support_row(
                         unit, issue, raw_date_reported, raw_date_resolved, 
-                        all_active_installs, install_to_building_map,
-                        selected_year, selected_month
+                        all_active_installs, install_to_building_map
                     )
 
                     if visit:
@@ -712,12 +704,9 @@ def reports(request):
             # OPTION B: Google Sheets (SIMPLE PUBLISHED CSV)
             # -----------------------
             elif action == 'google_sheets':
-                print("DEBUG: Processing Google Sheets", file=sys.stderr)
                 try:
                     if not GOOGLE_SHEET_CSV_URL:
                         raise Exception("Missing GOOGLE_SHEET_CSV_URL environment variable")
-                    
-                    print(f"DEBUG: Fetching {GOOGLE_SHEET_CSV_URL}", file=sys.stderr)
 
                     # Download the published CSV
                     response = requests.get(GOOGLE_SHEET_CSV_URL)
@@ -751,8 +740,6 @@ def reports(request):
                             if visit['mesh']: mesh_count += 1
                             if visit['issue'] == "Internet": internet_count += 1
                             avg_wait += visit['wait']
-                        else:
-                            print("DEBUG: Visit not valid!", file=sys.stderr)
                             
                 except Exception as e:
                     error_message = f"Error connecting to Google Sheets: {e}"
