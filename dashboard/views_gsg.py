@@ -766,7 +766,7 @@ def reports(request):
                     "avg_wait": round(avg_wait / len(support), 2)
                 }
             else:
-                error_message = "Support var is empty!"
+                error_message = "No support information to be displayed!"
     
     # NOTE: We are passing 'error_message' to the template. 
     # Ensure your template can display {{ error_message }} if it's not None.
@@ -781,14 +781,29 @@ def reports(request):
 @login_required
 def billing(request):
     months = []
-    start_date = datetime(2022, 1, 1)  # Start from January 2022
-    current_date = datetime.now()  # Current date
+    start_date = datetime(2022, 1, 1)
+    current_date = datetime.now()
     current_year_month = (current_date.year, current_date.month)
 
     installs = fetch_all_installs(ALLOWED_NETWORK_NUMBERS_3)
     units = fetch_all_units()
 
     installed = []
+
+    # Active counts per building
+    active_410 = 0
+    active_460 = 0
+    active_131 = 0
+
+    for install in installs:
+        if install.get("status") == "Active":
+            net = install["node"]["network_number"]
+            if net == 1932:
+                active_410 += 1
+            elif net == 1933:
+                active_460 += 1
+            elif net == 1934:
+                active_131 += 1
 
     while (start_date.year, start_date.month) < current_year_month:
         month_installs = []
@@ -800,17 +815,17 @@ def billing(request):
             except ValueError:
                 request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%SZ")
             abandon_date = datetime.strptime(install['abandon_date'], "%Y-%m-%d") if install['abandon_date'] else None
- 
+
             if install_date and install_date.year == start_date.year and install_date.month == start_date.month:
                 if install['unit'][0] == "0":
                     install['unit'] = install['unit'][1:]
                 new_install = ""
 
-                if (install['node']['network_number'] == 1932):
+                if install['node']['network_number'] == 1932:
                     new_install = "410-" + install['unit'].upper()
-                if (install['node']['network_number'] == 1933):
+                if install['node']['network_number'] == 1933:
                     new_install = "460-" + install['unit'].upper()
-                if (install['node']['network_number'] == 1934):
+                if install['node']['network_number'] == 1934:
                     new_install = "131-" + install['unit'].upper()
                 
                 if new_install not in installed:
@@ -831,5 +846,9 @@ def billing(request):
 
     return render(request, 'dashboard/gsg-billing.html', {
         'months': months,
-        'total': len(installed)
+        'total': len(installed),
+        'active_410': active_410,
+        'active_460': active_460,
+        'active_131': active_131,
+        'active_total': active_410 + active_460 + active_131
     })

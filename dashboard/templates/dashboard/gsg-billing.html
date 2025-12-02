@@ -52,6 +52,13 @@
             <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/'">Switch to Dashboard</button>
             <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/reports/'">Switch to Reports</button>
         </div>
+        <h2>Active Installs</h2>
+        <ul>
+            <li>410: {{ active_410 }}</li>
+            <li>460: {{ active_460 }}</li>
+            <li>131: {{ active_131 }}</li>
+            <li>Total Active: {{ active_total }}</li>
+        </ul>
         <table>
             <thead>
                 <tr>
