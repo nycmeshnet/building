@@ -766,7 +766,7 @@ def reports(request):
                     "avg_wait": round(avg_wait / len(support), 2)
                 }
             else:
-                error_message = "Support var is empty!"
+                error_message = "No support information to be displayed!"
     
     # NOTE: We are passing 'error_message' to the template. 
     # Ensure your template can display {{ error_message }} if it's not None.
