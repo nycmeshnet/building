@@ -8,10 +8,12 @@ import csv
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import requests
+from django.core.cache import cache
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,8 +22,13 @@ log = logging.getLogger(__name__)
 
 TIMEOUT = 30
 
+# Installs, ONUs and the support sheet are reused for this long, so clicking around the
+# dashboard doesn't download them again every time. The Refresh button skips this.
+CACHE_SECONDS = 60
+
 MESHDB_URL = 'https://db.nycmesh.net/api/v1'
-UISP_URL = 'https://10.70.76.21/nms/api/v2.1'
+UISP_WEB_URL = 'https://10.70.76.21/nms'
+UISP_URL = f'{UISP_WEB_URL}/api/v2.1'
 STRIPE_URL = 'https://api.stripe.com/v1'
 NINJA_URL = 'https://ninja.nycmesh.net/api/v1'
 
@@ -32,6 +39,25 @@ NINJA_API_KEY = os.environ.get("NINJA_API_KEY", "")
 GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "")
 
 DISPLAY_TIME = "%B %d, %Y %I:%M %p"
+
+def in_parallel(calls):
+    """Run {key: function} at the same time and return {key: result}. Pages wait on several slow services."""
+    if not calls:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = {key: pool.submit(function) for key, function in calls.items()}
+        return {key: future.result() for key, future in futures.items()}
+
+def _cached(key, fetch, fresh):
+    """fetch(), reusing a result from the last CACHE_SECONDS unless fresh is set. Failures aren't cached."""
+    if not fresh:
+        value = cache.get(key)
+        if value is not None:
+            return value
+    value = fetch()
+    if value is not None:
+        cache.set(key, value, CACHE_SECONDS)
+    return value
 
 def _get(url, **kwargs):
     """GET a JSON resource, or return None if the request fails for any reason."""
@@ -53,10 +79,12 @@ def _meshdb(path, params=None):
         'Authorization': f'Token {MESHDB_API_KEY}'
     })
 
-def fetch_installs(network_number):
+def fetch_installs(network_number, fresh=False):
     """All installs under a network number, or None if MeshDB fails."""
-    data = _meshdb("installs/lookup/", {'network_number': network_number, 'page_size': 9999})
-    return data['results'] if data else None
+    def fetch():
+        data = _meshdb("installs/lookup/", {'network_number': network_number, 'page_size': 9999})
+        return data['results'] if data else None
+    return _cached(f"installs:{network_number}", fetch, fresh)
 
 def fetch_member(member_id):
     return _meshdb(f"members/{member_id}/")
@@ -75,21 +103,27 @@ def search_members(query):
 
 # UISP
 
-def fetch_onus(parent_id):
-    """ONUs under a UISP parent device, or None if UISP can't be reached."""
-    # UISP is on a mesh address with a self-signed certificate
-    data = _get(f"{UISP_URL}/devices/onus", params={'parentId': parent_id}, verify=False, headers={
+def fetch_onus_by_parent(fresh=False):
+    """{UISP parent (OLT) id: [ONUs under it]} for every ONU in UISP, or None if UISP can't be reached."""
+    return _cached("onus", _fetch_onus_by_parent, fresh)
+
+def _fetch_onus_by_parent():
+    # One request for every ONU is much faster than one per OLT (UISP answers those one at a time).
+    # UISP is on a mesh address with a self-signed certificate.
+    data = _get(f"{UISP_URL}/devices", params={'type': 'onu'}, verify=False, headers={
         'accept': 'application/json',
         'x-auth-token': UISP_API_KEY
     })
     if data is None:
         return None
 
-    onus = []
+    onus = {}
     for d in data:
         last_seen = d['overview'].get('lastSeen')
-        onus.append({
+        onus.setdefault((d.get('attributes') or {}).get('parentId'), []).append({
             'name': d['identification']['name'],
+            # Opens the device's panel in the UISP web interface
+            'url': f"{UISP_WEB_URL}/devices#id={d['identification']['id']}&panelType=device-panel",
             'status': d['overview']['status'],
             'signal': d['overview'].get('signal', 'N/A'),
             'lastSeen': datetime.strptime(last_seen, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
@@ -158,8 +192,11 @@ def fetch_ninja_invoices(client_id):
 
 # Google Sheets
 
-def fetch_support_sheet():
+def fetch_support_sheet(fresh=False):
     """Rows of the published GSG support log (header skipped), or None if it can't be downloaded."""
+    return _cached("support-sheet", _fetch_support_sheet, fresh)
+
+def _fetch_support_sheet():
     if not GOOGLE_SHEET_CSV_URL:
         log.warning("GOOGLE_SHEET_CSV_URL is not set")
         return None

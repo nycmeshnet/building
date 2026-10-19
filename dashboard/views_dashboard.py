@@ -2,6 +2,7 @@
 The lookup and unit grid page, shared by every building group (/gsg/, /ph/).
 """
 from collections import Counter, defaultdict
+from functools import partial
 
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import render
@@ -87,67 +88,87 @@ def legend(grid, uisp_up):
     hidden = {"active"} if uisp_up else UISP_STATES
     return [(state, label, counts[state]) for state, label in LEGEND if state not in hidden]
 
+def ninja_invoices(name):
+    ninja_client = clients.fetch_ninja_client(name)
+    return clients.fetch_ninja_invoices(ninja_client['id']) if ninja_client else None
+
+def stripe_info(email):
+    """(subscription, delinquent) for the Stripe customer with this email."""
+    customer_id, delinquent = clients.fetch_stripe_customer(email) if email else (None, None)
+    return (clients.fetch_stripe_subscription(customer_id) if customer_id else None), delinquent
+
 def member_details(member, installs_by_id, onus):
     install = member_install(member, installs_by_id)
     apartment = buildings.apartment_key(install) if install else None
 
-    invoices = None
+    # Stripe and Invoice Ninja are looked up at the same time
+    calls = {'stripe': lambda: stripe_info(member.get('stripe_email_address') or member.get('primary_email_address'))}
     if install and install.get('unit'):
         building = buildings.BY_NETWORK_NUMBER[install['node']['network_number']]
-        ninja_client = clients.fetch_ninja_client(apartment or f"{building.number}-{install['unit']}")
-        if ninja_client:
-            invoices = clients.fetch_ninja_invoices(ninja_client['id'])
-
-    email = member.get('stripe_email_address') or member.get('primary_email_address')
-    customer_id, delinquent = clients.fetch_stripe_customer(email) if email else (None, None)
+        calls['invoices'] = lambda: ninja_invoices(apartment or f"{building.number}-{install['unit']}")
+    found = clients.in_parallel(calls)
+    subscription, delinquent = found['stripe']
 
     return {
         'member': member,
         'install': install,
         'device': onus.get(apartment),
-        'subscription': clients.fetch_stripe_subscription(customer_id) if customer_id else None,
+        'subscription': subscription,
         'delinquent': delinquent,
-        'invoices': invoices,
+        'invoices': found.get('invoices'),
     }
 
 @login_required
 def index(request, group):
     group_buildings = buildings.in_group(group)
-
-    installs = {b.network_number: clients.fetch_installs(b.network_number) for b in group_buildings}
-    installs_by_id = {i['id']: i for found in installs.values() for i in found or []}
-    onus_by_parent = {parent: clients.fetch_onus(parent) for parent in {b.uisp_parent_id for b in group_buildings}}
-    uisp_up = all(found is not None for found in onus_by_parent.values())
-    onus = onus_by_apartment(group_buildings, onus_by_parent)
+    parents = {b.uisp_parent_id for b in group_buildings}
+    fresh = 'refresh' in request.GET
 
     results = None
     selected = None
     error_message = None
 
+    form = None
     if request.method == 'POST':
         form = LookupForm(request.POST, results=request.session.get('results', []))
-        if form.is_valid():
-            selected_id = form.cleaned_data.get('selected_member')
-            query = form.cleaned_data.get('query', '').strip()
-            if selected_id:
-                selected = next((m for m in request.session.get('results', []) if str(m['id']) == selected_id), None)
-            elif not query:
-                error_message = "Enter a name, email, or phone number."
-            else:
-                members = clients.search_members(query)
-                if members is None:
-                    error_message = "MeshDB lookup failed. Try again in a moment."
-                else:
-                    results = [m for m in members if member_install(m, installs_by_id)]
-                    request.session['results'] = results
-                    if len(results) == 1:
-                        selected = results[0]
-                    elif not results:
-                        error_message = "No results found."
-
+        if not form.is_valid():
+            form = None
+    selected_id = form.cleaned_data.get('selected_member') if form else None
+    query = form.cleaned_data.get('query', '').strip() if form and not selected_id else ''
     member_id = request.GET.get("member")
+
+    # Everything the page needs from other services, fetched at the same time
+    calls = {('installs', b.network_number): partial(clients.fetch_installs, b.network_number, fresh) for b in group_buildings}
+    calls['onus'] = partial(clients.fetch_onus_by_parent, fresh)
+    if query:
+        calls['search'] = partial(clients.search_members, query)
     if member_id:
-        selected = clients.fetch_member(member_id)
+        calls['member'] = partial(clients.fetch_member, member_id)
+    found = clients.in_parallel(calls)
+
+    installs = {b.network_number: found[('installs', b.network_number)] for b in group_buildings}
+    installs_by_id = {i['id']: i for found_installs in installs.values() for i in found_installs or []}
+    uisp_up = found['onus'] is not None
+    onus_by_parent = {parent: (found['onus'] or {}).get(parent, []) for parent in parents}
+    onus = onus_by_apartment(group_buildings, onus_by_parent)
+
+    if form:
+        if selected_id:
+            selected = next((m for m in request.session.get('results', []) if str(m['id']) == selected_id), None)
+        elif not query:
+            error_message = "Enter a name, email, or phone number."
+        elif found['search'] is None:
+            error_message = "MeshDB lookup failed. Try again in a moment."
+        else:
+            results = [m for m in found['search'] if member_install(m, installs_by_id)]
+            request.session['results'] = results
+            if len(results) == 1:
+                selected = results[0]
+            elif not results:
+                error_message = "No results found."
+
+    if member_id:
+        selected = found['member']
         if not selected:
             error_message = "Couldn't load that member from MeshDB."
 

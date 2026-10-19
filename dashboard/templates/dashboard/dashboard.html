@@ -76,7 +76,7 @@
                 </div>
                 <div class="col">
                     <button type="submit" class="btn btn-secondary mb-2">Search</button>
-                    <button type="button" class="btn btn-success mb-2" onclick="location.href = location.pathname + location.search">Refresh</button>
+                    <button type="button" class="btn btn-success mb-2" onclick="const url = new URL(location.href); url.searchParams.set('refresh', '1'); location.href = url">Refresh</button>
                     {% for label, url in group.links %}
                     <button type="button" class="btn btn-primary mb-2" onclick="location.href = '{{ url }}'">{{ label }}</button>
                     {% endfor %}
@@ -151,7 +151,7 @@
                 <tbody>
                     <tr>
                         <th>Name</th>
-                        <td>{{ details.device.name }}</td>
+                        <td><a href="{{ details.device.url }}" target="_blank">{{ details.device.name }}</a></td>
                     </tr>
                     <tr>
                         <th>Status</th>
