@@ -1,6 +1,7 @@
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
+from functools import partial
 
 from dateutil import parser
 from django.shortcuts import render
@@ -16,9 +17,10 @@ INTERNET_KEYWORDS = ["internet", "wifi", "loco", "onu", "connection", "fiber"]
 # Slack thread links pasted into an issue are shown as "Details in Slack" instead of the raw URL
 SLACK_LINK = re.compile(r"https?://[\w.-]*slack\.com/\S+")
 
-def fetch_installs(group_buildings):
-    """All installs in the given buildings. Buildings MeshDB fails to return are left out."""
-    return [install for b in group_buildings for install in clients.fetch_installs(b.network_number) or []]
+def fetch_installs(group_buildings, fresh=False):
+    """All installs in the given buildings, fetched at the same time. Buildings MeshDB fails to return are left out."""
+    found = clients.in_parallel({b.network_number: partial(clients.fetch_installs, b.network_number, fresh) for b in group_buildings})
+    return [install for b in group_buildings for install in found[b.network_number] or []]
 
 def report_months():
     """Every month from REPORT_START up to, but not including, the current month."""
@@ -127,7 +129,12 @@ def reports(request):
         value = months[-1]['value']
     year, month = int(value[:4]), int(value[4:])
 
-    installs = fetch_installs(buildings.in_group("gsg"))
+    fresh = 'refresh' in request.GET
+    found = clients.in_parallel({
+        'installs': partial(fetch_installs, buildings.in_group("gsg"), fresh),
+        'sheet': partial(clients.fetch_support_sheet, fresh),
+    })
+    installs, sheet = found['installs'], found['sheet']
     report = {
         "value": value,
         "formatted": next(m['formatted'] for m in months if m['value'] == value),
@@ -138,7 +145,6 @@ def reports(request):
     support = []
     stats = {}
     error_message = None
-    sheet = clients.fetch_support_sheet()
     if sheet is None:
         error_message = "Couldn't download the support sheet from Google Sheets."
     else:
@@ -173,7 +179,7 @@ def billing(request):
     this_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     billable = buildings.billable()
-    installs = fetch_installs(billable)
+    installs = fetch_installs(billable, fresh='refresh' in request.GET)
 
     # Everything on this page is counted by apartment (see buildings.apartment_key), so the
     # active counts and the monthly table agree on what a unit is.
