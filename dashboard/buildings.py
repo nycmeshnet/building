@@ -56,3 +56,32 @@ def apartment_key(install):
         return None
 
     return f"{building.number}-{floor}{letter}"
+
+# Settings for each dashboard page that differ between building groups
+GROUPS = {
+    "gsg": {
+        'title': "GSG Dashboard",
+        'url': "/gsg/",
+        'grid_columns': "repeat(24, 1fr)",
+        'grid_gap': "2px",
+        'links': [("Switch to Reports", "/gsg/reports/"), ("Switch to Billing", "/gsg/billing/")],
+    },
+    "ph": {
+        'title': "PH Dashboard",
+        'url': "/ph/",
+        'grid_columns': "repeat(5, 1fr) 55px repeat(7, 1fr)",
+        'grid_gap': "0",
+        'links': [],
+    },
+}
+
+def onu_apartment(name):
+    """
+    Return (prefix, floor, letter) from an ONU name, or None if it doesn't name an apartment.
+    Accepts "410-14B", "1936-03A" and names with trailing words like "165-9D New ONU".
+    The prefix is the building number or network number, depending on how the ONU was named.
+    """
+    match = re.match(r'\s*(\d+)-0*(\d+)\s*([A-Za-z])\b', name or '')
+    if not match:
+        return None
+    return int(match[1]), int(match[2]), match[3].upper()
