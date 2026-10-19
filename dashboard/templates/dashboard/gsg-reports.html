@@ -64,7 +64,7 @@
             /* Cover fills the first sheet; the report data starts on the second */
             #page-1 {
                 display: flex;
-                height: 9.9in;
+                height: 9in;
                 align-items: center;
                 justify-content: center;
                 break-after: page;
@@ -220,7 +220,7 @@
                       <tr>
                         <th>Apartment</th>
                         <th>Mesh Member</th>
-                        <th>Issue</th>
+                        <th style="width: 35%">Issue</th>
                         <th>Date Reported</th>
                         <th>Date Resolved</th>
                         <th>Wait Time</th>
@@ -231,7 +231,12 @@
                       <tr>
                         <td style="background-color: unset; font-weight: unset;">{{ visit.unit }}</td>
                         <td><input type="checkbox" {% if visit.mesh %}checked{% endif %} disabled></td>
-                        <td>{{ visit.issue }}</td>
+                        <td>
+                          {{ visit.issue }}
+                          {% for link in visit.slack_links %}
+                          <a href="{{ link }}" target="_blank">Details in Slack</a>
+                          {% endfor %}
+                        </td>
                         <td>{{ visit.date_reported }}</td>
                         <td>{{ visit.date_resolved }}</td>
                         <td>{{ visit.wait }}</td>
