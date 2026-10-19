@@ -41,7 +41,7 @@
             vertical-align: middle;
             margin-right: 4px;
         }
-        /* Unit states, set by unit_state() in views_dashboard.py */
+        /* Unit states, set by unit_state() in views_dashboard.py; see LEGEND there */
         .online, .active {
             background-color: green;
         }
@@ -231,21 +231,18 @@
                 </tbody>
             </table>
         {% endif %}
+
+        <h2 class="mt-3">Units</h2>
+        <div class="legend">
+            {% for state, label, count in legend %}
+            <span><span class="square {{ state }}"></span>{{ label }} ({{ count }})</span>
+            {% endfor %}
+        </div>
     </div>
 
     {% for building in grid %}
         <div class="column">
             <h2>Building {{ building.building.number }}</h2>
-            {% if forloop.first %}
-            <div class="legend">
-                <span><span class="square online"></span>Active, ONU online</span>
-                <span><span class="square offline"></span>Active, ONU offline</span>
-                <span><span class="square no-onu"></span>Active, no ONU found</span>
-                <span><span class="square unrecorded"></span>ONU online, no Active install</span>
-                <span><span class="square pending"></span>Pending</span>
-                <span><span class="square closed"></span>Closed</span>
-            </div>
-            {% endif %}
             {% if not building.loaded %}
                 <p style="color: red;">Couldn't load installs from MeshDB.</p>
             {% endif %}

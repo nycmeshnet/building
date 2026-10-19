@@ -1,7 +1,7 @@
 """
 The lookup and unit grid page, shared by every building group (/gsg/, /ph/).
 """
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import render
@@ -14,6 +14,19 @@ ONLINE = 'active'  # UISP's status for a connected ONU
 # When a unit or member has several installs, show the one with the most relevant
 # status, then the most recent
 STATUS_PRIORITY = {"Active": 0, "Pending": 1, "Request Received": 2}
+
+# Grid states in legend order, with their legend labels
+LEGEND = [
+    ("online", "Active, ONU online"),
+    ("active", "Active, ONU status unknown"),
+    ("offline", "Active, ONU offline"),
+    ("no-onu", "Active, no ONU found"),
+    ("unrecorded", "ONU online, no Active install"),
+    ("pending", "Pending"),
+    ("closed", "Closed"),
+    ("empty", "No install"),
+]
+UISP_STATES = {"online", "offline", "no-onu", "unrecorded"}
 
 def best_install(installs):
     return min(installs, key=lambda i: (STATUS_PRIORITY.get(i['status'], 3), -i['install_number']), default=None)
@@ -36,7 +49,7 @@ def onus_by_apartment(group_buildings, onus_by_parent):
     return result
 
 def unit_state(install, onu, uisp_up):
-    """The grid color for a unit. Keep in sync with the legend in dashboard.html."""
+    """The grid state for a unit: one of the states in LEGEND."""
     status = install['status'] if install else None
     online = bool(onu) and onu['status'] == ONLINE
     if status == "Active":
@@ -68,6 +81,12 @@ def unit_grid(building, installs, onus, uisp_up):
             units.append({'name': name, 'install': install, 'state': unit_state(install, onus.get(apt), uisp_up)})
         floors.append(units)
     return {'building': building, 'floors': floors, 'loaded': installs is not None}
+
+def legend(grid, uisp_up):
+    """(state, label, number of units) for each state that can appear on the page."""
+    counts = Counter(unit['state'] for building in grid for floor in building['floors'] for unit in floor)
+    hidden = {"active"} if uisp_up else UISP_STATES
+    return [(state, label, counts[state]) for state, label in LEGEND if state not in hidden]
 
 def member_details(member, installs_by_id, onus):
     install = member_install(member, installs_by_id)
@@ -133,11 +152,14 @@ def index(request, group):
         if not selected:
             error_message = "Couldn't load that member from MeshDB."
 
+    grid = [unit_grid(b, installs[b.network_number], onus, uisp_up) for b in group_buildings]
+
     return render(request, 'dashboard/dashboard.html', {
         'group': buildings.GROUPS[group],
         'results': results,
         'error_message': error_message,
         'uisp_up': uisp_up,
         'details': member_details(selected, installs_by_id, onus) if selected else None,
-        'grid': [unit_grid(b, installs[b.network_number], onus, uisp_up) for b in group_buildings],
+        'grid': grid,
+        'legend': legend(grid, uisp_up),
     })
