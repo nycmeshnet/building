@@ -1,0 +1,10 @@
+# Packages the app uses directly. requirements.txt pins these and everything they
+# depend on, with hashes. To upgrade, edit this file if needed and regenerate with:
+#   uv pip compile requirements.in --universal --upgrade --generate-hashes --python-version 3.14 -o requirements.txt
+Django~=5.2.17  # 5.2 is the LTS release, supported until April 2028
+gunicorn
+mozilla-django-oidc
+python-dateutil
+python-dotenv
+requests
+whitenoise
