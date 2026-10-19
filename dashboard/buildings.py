@@ -15,6 +15,7 @@ class Building:
     units_per_floor: int    # Apartment letters per floor, starting at A
     uisp_parent_id: str     # UISP device whose ONUs serve the building
     billable: bool = False  # Included on the GSG billing page
+    residents_pay: bool = True  # Residents pay for internet themselves (Stripe or Invoice Ninja)
 
     @property
     def unit_letters(self):
@@ -24,7 +25,7 @@ BUILDINGS = [
     Building(1932, 410, "gsg", range(2, 27), 8, 'a57ddde1-6fff-463a-bbee-cbe90258daa6', billable=True),
     Building(1933, 460, "gsg", range(2, 27), 8, '7ee45009-6bc2-4a26-9b83-a3b07c70a3f6', billable=True),
     Building(1934, 131, "gsg", range(2, 27), 8, '7ee45009-6bc2-4a26-9b83-a3b07c70a3f6', billable=True),
-    Building(1936, 165, "gsg", range(3, 16), 18, '4a6f43ed-ac8b-41c6-867b-e893d9737c31'),
+    Building(1936, 165, "gsg", range(3, 16), 18, '4a6f43ed-ac8b-41c6-867b-e893d9737c31', residents_pay=False),  # paid by the building association
     Building(3461, 3461, "ph", range(1, 16), 12, 'cd815a56-612a-46a9-ae87-b80aab35730b'),
 ]
 

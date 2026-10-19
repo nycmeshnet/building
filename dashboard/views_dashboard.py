@@ -29,6 +29,25 @@ LEGEND = [
 ]
 UISP_STATES = {"online", "offline", "no-onu", "unrecorded"}
 
+# Payments view states in legend order, with their legend labels
+PAYMENTS_LEGEND = [
+    ("pay-stripe", "Stripe, paid up"),
+    ("pay-stripe-behind", "Stripe, behind"),
+    ("pay-ninja", "Ninja, paid up"),
+    ("pay-ninja-owes", "Ninja, owes a balance"),
+    ("pay-ninja-setup", "Ninja client, no recurring invoice"),
+    ("pay-stripe-canceled", "Stripe canceled, nothing else"),
+    ("pay-unbilled", "Active, no payment record"),
+    ("pay-inactive-paying", "No Active install, still paying on Stripe"),
+    ("pay-building", "Paid by the building"),
+    ("pay-unknown", "Payment data unavailable"),
+    ("pay-none", "No install, not paying"),
+]
+PAYMENT_LABELS = dict(PAYMENTS_LEGEND)
+STRIPE_PAYING = {"active", "trialing"}
+STRIPE_BEHIND = {"past_due", "unpaid", "incomplete"}
+INTERNET_MONTHLY = 10  # dollars a resident pays per month
+
 def best_install(installs):
     return min(installs, key=lambda i: (STATUS_PRIORITY.get(i['status'], 3), -i['install_number']), default=None)
 
@@ -64,7 +83,66 @@ def unit_state(install, onu, uisp_up):
         return "closed"
     return "empty"
 
-def unit_grid(building, installs, onus, uisp_up):
+class PaymentRecords:
+    """Stripe subscriptions, Invoice Ninja clients and member emails, looked up by install."""
+
+    def __init__(self, subscriptions, ninja_clients, member_emails, group_buildings):
+        self.available = subscriptions is not None and ninja_clients is not None
+        self.subscriptions = defaultdict(list)
+        for subscription in subscriptions or []:
+            if subscription['email']:
+                self.subscriptions[subscription['email']].append(subscription)
+        # Ninja clients are named after the apartment, e.g. "410-14B"
+        self.ninja = {}
+        for client in ninja_clients or []:
+            apt = buildings.apartment_from_name(client['name'], group_buildings)
+            if apt:
+                self.ninja[apt] = client
+        self.member_emails = member_emails
+
+    def for_install(self, install):
+        """(emails, Stripe subscriptions, Ninja client) for an install's member and apartment."""
+        emails = self.member_emails.get((install.get('member') or {}).get('id'), [])
+        subscriptions = [s for email in emails for s in self.subscriptions.get(email, [])]
+        return emails, subscriptions, self.ninja.get(buildings.apartment_key(install))
+
+def payment_state(building, install, records):
+    """The grid state for a unit in the Payments view: one of the states in PAYMENTS_LEGEND."""
+    if not install:
+        return "pay-none"
+    if not records.available:
+        return "pay-unknown"
+    emails, subscriptions, ninja = records.for_install(install)
+    statuses = {s['status'] for s in subscriptions}
+    if install['status'] != "Active":
+        return "pay-inactive-paying" if statuses & (STRIPE_PAYING | STRIPE_BEHIND) else "pay-none"
+    if not building.residents_pay:
+        return "pay-building"
+    if statuses & STRIPE_BEHIND:
+        return "pay-stripe-behind"
+    if statuses & STRIPE_PAYING:
+        return "pay-stripe"
+    if ninja:
+        if not ninja['recurring']:
+            return "pay-ninja-setup"
+        return "pay-ninja-owes" if ninja['balance'] > 0 else "pay-ninja"
+    if statuses:
+        return "pay-stripe-canceled"
+    return "pay-unbilled"
+
+def payment_details(install, records):
+    """What the Payments view knows about one install, for the member details."""
+    building = buildings.BY_NETWORK_NUMBER[install['node']['network_number']]
+    emails, subscriptions, ninja = records.for_install(install)
+    return {
+        'state': PAYMENT_LABELS[payment_state(building, install, records)],
+        'emails': emails,
+        'subscriptions': subscriptions,
+        'ninja': ninja,
+        'months_owed': round(ninja['balance'] / INTERNET_MONTHLY, 1) if ninja else None,
+    }
+
+def unit_grid(building, installs, onus, uisp_up, records=None):
     by_apartment = defaultdict(list)
     for install in installs or []:
         apt = buildings.apartment_key(install)
@@ -78,12 +156,19 @@ def unit_grid(building, installs, onus, uisp_up):
             name = f"{floor}{letter}"
             apt = f"{building.number}-{name}"
             install = best_install(by_apartment[apt])
-            units.append({'name': name, 'install': install, 'state': unit_state(install, onus.get(apt), uisp_up)})
+            unit = {'name': name, 'install': install, 'state': unit_state(install, onus.get(apt), uisp_up)}
+            if records:
+                unit['payment'] = payment_state(building, install, records)
+            units.append(unit)
         floors.append(units)
     return {'building': building, 'floors': floors, 'loaded': installs is not None}
 
-def legend(grid, uisp_up):
+def legend(grid, uisp_up, payments=None):
     """(state, label, number of units) for each state that can appear on the page."""
+    if payments:
+        counts = Counter(unit['payment'] for building in grid for floor in building['floors'] for unit in floor)
+        hidden = set() if not payments.available else {"pay-unknown"}
+        return [(state, label, counts[state]) for state, label in PAYMENTS_LEGEND if state not in hidden]
     counts = Counter(unit['state'] for building in grid for floor in building['floors'] for unit in floor)
     hidden = {"active"} if uisp_up else UISP_STATES
     return [(state, label, counts[state]) for state, label in LEGEND if state not in hidden]
@@ -97,7 +182,7 @@ def stripe_info(email):
     customer_id, delinquent = clients.fetch_stripe_customer(email) if email else (None, None)
     return (clients.fetch_stripe_subscription(customer_id) if customer_id else None), delinquent
 
-def member_details(member, installs_by_id, onus):
+def member_details(member, installs_by_id, onus, payments=None):
     install = member_install(member, installs_by_id)
     apartment = buildings.apartment_key(install) if install else None
 
@@ -116,6 +201,7 @@ def member_details(member, installs_by_id, onus):
         'subscription': subscription,
         'delinquent': delinquent,
         'invoices': found.get('invoices'),
+        'payment': payment_details(install, payments) if payments and payments.available and install else None,
     }
 
 @login_required
@@ -123,6 +209,7 @@ def index(request, group):
     group_buildings = buildings.in_group(group)
     parents = {b.uisp_parent_id for b in group_buildings}
     fresh = 'refresh' in request.GET
+    view = 'payments' if request.GET.get('view') == 'payments' else 'operations'
 
     results = None
     selected = None
@@ -144,6 +231,9 @@ def index(request, group):
         calls['search'] = partial(clients.search_members, query)
     if member_id:
         calls['member'] = partial(clients.fetch_member, member_id)
+    if view == 'payments':
+        calls['stripe'] = partial(clients.fetch_stripe_subscriptions, fresh)
+        calls['ninja'] = partial(clients.fetch_ninja_billing, fresh)
     found = clients.in_parallel(calls)
 
     installs = {b.network_number: found[('installs', b.network_number)] for b in group_buildings}
@@ -172,14 +262,22 @@ def index(request, group):
         if not selected:
             error_message = "Couldn't load that member from MeshDB."
 
-    grid = [unit_grid(b, installs[b.network_number], onus, uisp_up) for b in group_buildings]
+    payments = None
+    if view == 'payments':
+        member_ids = sorted({i['member']['id'] for i in installs_by_id.values() if i.get('member')})
+        payments = PaymentRecords(found['stripe'], found['ninja'], clients.fetch_member_emails(member_ids), group_buildings)
+        if not payments.available:
+            error_message = "Couldn't load payment data from Stripe or Invoice Ninja, so payment colors aren't shown."
+
+    grid = [unit_grid(b, installs[b.network_number], onus, uisp_up, payments) for b in group_buildings]
 
     return render(request, 'dashboard/dashboard.html', {
         'group': buildings.GROUPS[group],
         'results': results,
         'error_message': error_message,
         'uisp_up': uisp_up,
-        'details': member_details(selected, installs_by_id, onus) if selected else None,
+        'view': view,
+        'details': member_details(selected, installs_by_id, onus, payments) if selected else None,
         'grid': grid,
-        'legend': legend(grid, uisp_up),
+        'legend': legend(grid, uisp_up, payments),
     })

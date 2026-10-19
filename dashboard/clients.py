@@ -8,8 +8,10 @@ import csv
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from zoneinfo import ZoneInfo
 
 import requests
@@ -40,11 +42,11 @@ GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "")
 
 DISPLAY_TIME = "%B %d, %Y %I:%M %p"
 
-def in_parallel(calls):
+def in_parallel(calls, max_workers=None):
     """Run {key: function} at the same time and return {key: result}. Pages wait on several slow services."""
     if not calls:
         return {}
-    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(calls), max_workers or len(calls))) as pool:
         futures = {key: pool.submit(function) for key, function in calls.items()}
         return {key: future.result() for key, future in futures.items()}
 
@@ -189,6 +191,112 @@ def fetch_ninja_invoices(client_id):
         'reminder3_sent': invoice['reminder3_sent'],
         'next_send_date': invoice['next_send_date']
     } for invoice in data['data']]
+
+# Payments view: bulk data for every apartment at once
+
+MEMBER_EMAIL_CACHE_SECONDS = 24 * 60 * 60  # emails rarely change, and fetching every member is slow
+
+def fetch_member_emails(member_ids):
+    """{member id: [lowercased email addresses]} for each member MeshDB returns. Kept for a day."""
+    # One cache entry for all members, since reading hundreds of separate cache files is slow.
+    # Each member's emails carry the time they were fetched and are fetched again after a day.
+    now = time.time()
+    emails = {member_id: entry for member_id, entry in (cache.get("member-emails") or {}).items()
+              if now - entry['fetched'] < MEMBER_EMAIL_CACHE_SECONDS}
+
+    def fetch(member_id):
+        member = fetch_member(member_id)
+        if member is None:
+            return None
+        found = [member.get('stripe_email_address'), member.get('primary_email_address'), *(member.get('all_email_addresses') or [])]
+        return sorted({e.strip().lower() for e in found if e})
+
+    missing = [member_id for member_id in member_ids if member_id not in emails]
+    if missing:
+        fetched = in_parallel({member_id: partial(fetch, member_id) for member_id in missing}, max_workers=32)
+        emails.update({member_id: {'emails': value, 'fetched': now} for member_id, value in fetched.items() if value is not None})
+        cache.set("member-emails", emails, None)
+    return {member_id: emails[member_id]['emails'] for member_id in member_ids if member_id in emails}
+
+def fetch_stripe_subscriptions(fresh=False):
+    """Every Stripe subscription with its customer's email, or None if Stripe can't be reached."""
+    return _cached("stripe-subscriptions", _fetch_stripe_subscriptions, fresh)
+
+def _fetch_stripe_subscriptions():
+    # Stripe pages through a list one request at a time, so split it into creation-date slices
+    # and page through the slices at the same time
+    edges = [int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp())
+             for year in range(2019, datetime.now().year + 1) for month in (1, 4, 7, 10)]
+    slices = list(zip([None] + edges, edges + [None]))
+
+    def fetch_slice(start, end):
+        found, after = [], None
+        while True:
+            params = {'status': 'all', 'limit': 100, 'expand[]': ['data.customer', 'data.latest_invoice']}
+            if start:
+                params['created[gte]'] = start
+            if end:
+                params['created[lt]'] = end
+            if after:
+                params['starting_after'] = after
+            page = _stripe("subscriptions", params)
+            if page is None:
+                return None
+            found += page['data']
+            if not page['has_more']:
+                return found
+            after = page['data'][-1]['id']
+
+    pages = in_parallel({i: partial(fetch_slice, start, end) for i, (start, end) in enumerate(slices)}, max_workers=12)
+    if any(page is None for page in pages.values()):
+        return None
+
+    subscriptions = []
+    for subscription in (s for page in pages.values() for s in page):
+        customer = subscription.get('customer') if isinstance(subscription.get('customer'), dict) else {}
+        invoice = subscription.get('latest_invoice') if isinstance(subscription.get('latest_invoice'), dict) else {}
+        price = subscription['items']['data'][0]['price'] if subscription['items']['data'] else {}
+        paid_at = (invoice.get('status_transitions') or {}).get('paid_at')
+        subscriptions.append({
+            'email': (customer.get('email') or '').strip().lower(),
+            'status': subscription['status'],
+            'plan': price.get('nickname') or (f"${price['unit_amount'] / 100:g}/{price.get('recurring', {}).get('interval', '')}" if price.get('unit_amount') else 'Unknown plan'),
+            'last_paid': datetime.fromtimestamp(paid_at, timezone.utc).strftime("%B %d, %Y") if paid_at else None,
+            'canceled': datetime.fromtimestamp(subscription['canceled_at'], timezone.utc).strftime("%B %d, %Y") if subscription.get('canceled_at') else None,
+        })
+    return subscriptions
+
+def fetch_ninja_billing(fresh=False):
+    """Invoice Ninja clients, which of them have an active recurring invoice, and their last recorded payment."""
+    return _cached("ninja-billing", _fetch_ninja_billing, fresh)
+
+def _ninja_all(path):
+    found, page = [], 1
+    while True:
+        data = _ninja(path, {'per_page': 500, 'page': page})
+        if data is None:
+            return None
+        found += data['data']
+        if page >= data.get('meta', {}).get('pagination', {}).get('total_pages', 1):
+            return found
+        page += 1
+
+def _fetch_ninja_billing():
+    found = in_parallel({path: partial(_ninja_all, path) for path in ("clients", "recurring_invoices", "payments")})
+    if any(value is None for value in found.values()):
+        return None
+    last_payment = {}
+    for payment in found['payments']:
+        if not payment.get('is_deleted') and payment.get('date'):
+            last_payment[payment['client_id']] = max(last_payment.get(payment['client_id'], ''), payment['date'])
+    active_recurring = {r['client_id'] for r in found['recurring_invoices'] if str(r.get('status_id')) == '2' and not r.get('is_deleted')}
+    return [{
+        'id': c['id'],
+        'name': c.get('name') or '',
+        'balance': float(c.get('balance') or 0),
+        'recurring': c['id'] in active_recurring,
+        'last_payment': last_payment.get(c['id']),
+    } for c in found['clients'] if not c.get('is_deleted')]
 
 # Google Sheets
 

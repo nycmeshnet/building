@@ -63,6 +63,40 @@
         .no-onu a, .unrecorded a, .pending a {
             color: black;
         }
+        /* Payments view states, set by payment_state() in views_dashboard.py; see PAYMENTS_LEGEND there */
+        .pay-stripe {
+            background-color: green;
+        }
+        .pay-stripe-behind {
+            background-color: red;
+        }
+        .pay-ninja {
+            background-color: royalblue;
+        }
+        .pay-ninja-owes {
+            background-color: orange;
+        }
+        .pay-ninja-setup {
+            background-color: yellow;
+        }
+        .pay-stripe-canceled {
+            background-color: purple;
+        }
+        .pay-unbilled, .pay-unknown {
+            background-color: grey;
+        }
+        .pay-inactive-paying {
+            background-color: hotpink;
+        }
+        .pay-building {
+            background-color: lightgrey;
+        }
+        .pay-ninja-owes a, .pay-ninja-setup a, .pay-inactive-paying a, .pay-building a, .pay-none a {
+            color: black;
+        }
+        .view-switch label {
+            margin-right: 16px;
+        }
     </style>
 </head>
 <body class="p-3">
@@ -83,6 +117,23 @@
                 </div>
             </div>
         </form>
+
+        <div class="view-switch mb-2">
+            <label><input type="radio" name="view" id="view-operations" value="operations" {% if view == 'operations' %}checked{% endif %} onchange="switchView(this.value)"> Operations</label>
+            <label><input type="radio" name="view" id="view-payments" value="payments" {% if view == 'payments' %}checked{% endif %} onchange="switchView(this.value)"> Payments</label>
+        </div>
+        <script>
+            function switchView(view) {
+                const url = new URL(location.href);
+                url.searchParams.delete('refresh');
+                if (view === 'payments') {
+                    url.searchParams.set('view', 'payments');
+                } else {
+                    url.searchParams.delete('view');
+                }
+                location.href = url;
+            }
+        </script>
 
         {% if error_message %}
             <p style="color: red;">{{ error_message }}</p>
@@ -233,6 +284,49 @@
             </table>
         {% endif %}
 
+        {% if details.payment %}
+            <h2>Payment Status</h2>
+            <table class="table">
+                <tbody>
+                    <tr>
+                        <th>Status</th>
+                        <td>{{ details.payment.state }}</td>
+                    </tr>
+                    <tr>
+                        <th>Emails Matched</th>
+                        <td>{{ details.payment.emails|join:", "|default:"None on file" }}</td>
+                    </tr>
+                    {% for subscription in details.payment.subscriptions %}
+                    <tr>
+                        <th>Stripe</th>
+                        <td>
+                            {{ subscription.plan }}, {{ subscription.status }}
+                            {% if subscription.last_paid %}, last paid {{ subscription.last_paid }}{% endif %}
+                            {% if subscription.canceled %}, canceled {{ subscription.canceled }}{% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <th>Stripe</th>
+                        <td>No subscription found for these emails</td>
+                    </tr>
+                    {% endfor %}
+                    <tr>
+                        <th>Ninja</th>
+                        <td>
+                            {% if details.payment.ninja %}
+                            Client "{{ details.payment.ninja.name }}", balance ${{ details.payment.ninja.balance|floatformat:2 }} ({{ details.payment.months_owed }} months),
+                            {% if details.payment.ninja.recurring %}recurring invoice active{% else %}no recurring invoice{% endif %},
+                            last payment recorded {{ details.payment.ninja.last_payment|default:"never" }}
+                            {% else %}
+                            No client for this apartment
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        {% endif %}
+
         <h2 class="mt-3">Units</h2>
         <div class="legend">
             {% for state, label, count in legend %}
@@ -250,9 +344,9 @@
             {% for units in building.floors %}
                 <div class="row">
                     {% for unit in units %}
-                        <div class="square {{ unit.state }}">
+                        <div class="square {% if view == 'payments' %}{{ unit.payment }}{% else %}{{ unit.state }}{% endif %}">
                             {% if unit.install %}
-                            <a href="{{ group.url }}?member={{ unit.install.member.id }}">{{ unit.name }}</a>
+                            <a href="{{ group.url }}?member={{ unit.install.member.id }}{% if view == 'payments' %}&amp;view=payments{% endif %}">{{ unit.name }}</a>
                             {% else %}
                             {{ unit.name }}
                             {% endif %}
