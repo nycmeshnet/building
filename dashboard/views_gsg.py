@@ -10,6 +10,7 @@ from django.contrib.auth.decorators import login_required
 from . import buildings, clients
 
 REPORT_START = datetime(2022, 1, 1)
+BILLED_NETWORK_NUMBERS = {b.network_number for b in buildings.billable()}
 
 # A support visit counts as internet-related if its issue mentions any of these
 INTERNET_KEYWORDS = ["internet", "wifi", "loco", "onu", "connection", "fiber"]
@@ -41,18 +42,30 @@ def parse_request_date(value):
     except ValueError:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
 
-def report_category(install):
-    """The install-data row an install counts toward and the date it counts on, or None."""
-    status = install['status']
-    if status == "Active" and install['install_date']:
-        return "completed", parse_day(install['install_date'])
-    if status == "Request Received":
-        return "pending", parse_request_date(install['request_date'])
-    if status == "Closed" and install['abandon_date']:
-        return "uninstalled", parse_day(install['abandon_date'])
-    if status == "Closed":
-        return "no_reply", parse_request_date(install['request_date'])
-    return None
+def report_events(installs):
+    """
+    (row, date, install) for each event in the install-data tables, counted the way the billing
+    page counts: apartments only, and an apartment is "Installed" once, at its first install.
+    """
+    first = {}
+    for install in installs:
+        apt = buildings.apartment_key(install)
+        installed = parse_day(install['install_date'])
+        if apt and installed and (apt not in first or installed < first[apt][0]):
+            first[apt] = (installed, install)
+    for installed, install in first.values():
+        yield "completed", installed, install
+
+    for install in installs:
+        if not buildings.apartment_key(install):
+            continue
+        status = install['status']
+        if status == "Request Received":
+            yield "pending", parse_request_date(install['request_date']), install
+        elif status == "Closed" and install['abandon_date']:
+            yield "uninstalled", parse_day(install['abandon_date']), install
+        elif status == "Closed" and not install['install_date']:
+            yield "no_reply", parse_request_date(install['request_date']), install
 
 def install_report(installs, year, month):
     """Install counts for the selected month and the 4 before it, the selected year and the 3 before it, and all time."""
@@ -66,11 +79,7 @@ def install_report(installs, year, month):
     yearly = defaultdict(Counter)
     all_time = Counter()
     waits = []
-    for install in installs:
-        found = report_category(install)
-        if not found:
-            continue
-        category, date = found
+    for category, date, install in report_events(installs):
         monthly[category][(date.year, date.month)] += 1
         yearly[category][date.year] += 1
         all_time[category] += 1
@@ -138,7 +147,8 @@ def reports(request):
     report = {
         "value": value,
         "formatted": next(m['formatted'] for m in months if m['value'] == value),
-        **install_report(installs, year, month)
+        # Same buildings as the billing page; 165 Broome is billed separately
+        **install_report([i for i in installs if i['node']['network_number'] in BILLED_NETWORK_NUMBERS], year, month)
     }
 
     # Support log columns: ID, Apartment, Issue, Reported By, Date Reported, Date Resolved
