@@ -1,3 +1,4 @@
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -11,6 +12,9 @@ REPORT_START = datetime(2022, 1, 1)
 
 # A support visit counts as internet-related if its issue mentions any of these
 INTERNET_KEYWORDS = ["internet", "wifi", "loco", "onu", "connection", "fiber"]
+
+# Slack thread links pasted into an issue are shown as "Details in Slack" instead of the raw URL
+SLACK_LINK = re.compile(r"https?://[\w.-]*slack\.com/\S+")
 
 def fetch_installs(group_buildings):
     """All installs in the given buildings. Buildings MeshDB fails to return are left out."""
@@ -107,7 +111,8 @@ def support_visit(unit, issue, raw_reported, raw_resolved, active_apartments, ye
     return {
         "unit": unit.strip().replace(" ", ""),
         "mesh": buildings.apartment_from_name(unit, buildings.in_group("gsg")) in active_apartments,
-        "issue": issue.strip(),
+        "issue": SLACK_LINK.sub("", issue).strip(" /"),
+        "slack_links": SLACK_LINK.findall(issue),
         "date_reported": reported.strftime("%m/%d/%Y"),
         "date_resolved": resolved.strftime("%m/%d/%Y") if resolved else "Open",
         "wait": ((resolved or datetime.now()) - reported).days
