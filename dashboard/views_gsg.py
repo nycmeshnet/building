@@ -1,413 +1,179 @@
-import requests
-import sys
-import os
 import csv
-import json
+from collections import Counter, defaultdict
+from datetime import datetime
+
 from dateutil import parser
-from datetime import datetime, timedelta
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
+
+from . import buildings, clients
 from .forms import ReportForm
-from . import buildings
-from dotenv import load_dotenv
-from collections import defaultdict
 
-load_dotenv()
+REPORT_START = datetime(2022, 1, 1)
 
-INSTALL_API_URL = 'https://db.nycmesh.net/api/v1/installs/'
-MESHDB_API_KEY = os.environ.get("MESHDB_API_KEY","")
-GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "")
+# A support visit counts as internet-related if its issue mentions any of these
+INTERNET_KEYWORDS = ["internet", "wifi", "loco", "onu", "connection", "fiber"]
 
-headers = {
-    'accept': 'application/json',
-    'Authorization': f'Token {MESHDB_API_KEY}'
-}
+def fetch_installs(group_buildings):
+    """All installs in the given buildings. Buildings MeshDB fails to return are left out."""
+    return [install for b in group_buildings for install in clients.fetch_installs(b.network_number) or []]
 
-# Derived from buildings.py until reports is moved onto it directly
-GSG_BUILDINGS = buildings.in_group("gsg")
-ALLOWED_NETWORK_NUMBERS = [b.network_number for b in GSG_BUILDINGS]
-install_to_building_map = {b.network_number: b.number for b in GSG_BUILDINGS}
+def report_months():
+    """Every month from REPORT_START up to, but not including, the current month."""
+    months = []
+    month = REPORT_START
+    this_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while month < this_month:
+        months.append({'value': month.strftime("%Y%m"), 'formatted': month.strftime("%B %Y")})
+        month = month.replace(year=month.year + month.month // 12, month=month.month % 12 + 1)
+    return months
 
-internet_keywords = [
-    "internet",
-    "wifi",
-    "loco",
-    "onu",
-    "connection",
-    "fiber"
-]
+def parse_day(value):
+    return datetime.strptime(value, "%Y-%m-%d") if value else None
 
-def fetch_all_installs(network_numbers):
-    installs = []
-    for building in network_numbers:
-        response = requests.get(f"{INSTALL_API_URL}/lookup/?network_number={building}&page_size=9999", headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            for install in data['results']:
-                installs.append(install)
-    return installs
-
-def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
-    if not raw_date_reported:
-        return None
-
-    # Clean whitespace and unexpected spaces
-    unit = unit.strip().replace(" ", "")
-    issue = issue.strip()
-    raw_date_reported = raw_date_reported.strip()
-    raw_date_resolved = raw_date_resolved.strip() if raw_date_resolved else ""
-
-    # Parse Date Reported
+def parse_request_date(value):
     try:
-        date_reported = parser.parse(raw_date_reported)
-    except Exception as e:
-        print(e, file=sys.stderr)
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+
+def report_category(install):
+    """The install-data row an install counts toward and the date it counts on, or None."""
+    status = install['status']
+    if status == "Active" and install['install_date']:
+        return "completed", parse_day(install['install_date'])
+    if status == "Request Received":
+        return "pending", parse_request_date(install['request_date'])
+    if status == "Closed" and install['abandon_date']:
+        return "uninstalled", parse_day(install['abandon_date'])
+    if status == "Closed":
+        return "no_reply", parse_request_date(install['request_date'])
+    return None
+
+def install_report(installs, year, month):
+    """Install counts for the selected month and the 4 before it, the selected year and the 3 before it, and all time."""
+    months = [(year, month)]
+    for _ in range(4):
+        y, m = months[-1]
+        months.append((y - 1, 12) if m == 1 else (y, m - 1))
+    years = [year - i for i in range(4)]
+
+    monthly = defaultdict(Counter)
+    yearly = defaultdict(Counter)
+    all_time = Counter()
+    waits = []
+    for install in installs:
+        found = report_category(install)
+        if not found:
+            continue
+        category, date = found
+        monthly[category][(date.year, date.month)] += 1
+        yearly[category][date.year] += 1
+        all_time[category] += 1
+        if category == "completed" and (date.year, date.month) == (year, month):
+            requested = parse_request_date(install['request_date']).replace(hour=0, minute=0, second=0, microsecond=0)
+            waits.append((date - requested).days)
+
+    late = sum(1 for wait in waits if wait > 7)
+    report = {
+        "written_months": [datetime(y, m, 1).strftime("%B") for y, m in months],
+        "written_years": [str(y) for y in years],
+        "response_meanwait": round(sum(waits) / len(waits), 2) if waits else 0,
+        "response_weekwait": late,
+        "response_shortwait": len(waits) - late,
+        "response_percent": int((len(waits) - late) / len(waits) * 100) if waits else 0,
+    }
+    for category in ("completed", "pending", "no_reply", "uninstalled"):
+        report[f"{category}_installs"] = [monthly[category][ym] for ym in months]
+        report[f"{category}_installs_years"] = [yearly[category][y] for y in years]
+        report[f"{category}_installs_all_time"] = all_time[category]
+    return report
+
+def support_visit(unit, issue, raw_reported, raw_resolved, active_apartments, year=None, month=None):
+    """
+    One row of the support table, or None if the row has no readable report date or,
+    when year and month are given, was reported in a different month.
+    """
+    try:
+        reported = parser.parse(raw_reported.strip())
+    except (ValueError, OverflowError):
+        return None
+    if year and month and (reported.year, reported.month) != (year, month):
         return None
 
-    # Filter by month and year
-    if filter_year and filter_month:
-        if date_reported.year != filter_year or date_reported.month != filter_month:
-            return None
-
-    # Parse Date Resolved if present
-    date_resolved = None
-    if raw_date_resolved:
-        try:
-            date_resolved = parser.parse(raw_date_resolved)
-        except Exception:
-            date_resolved = None
-
-    # Calculate wait time
-    if date_resolved:
-        wait = (date_resolved - date_reported).days
-    else:
-        wait = (datetime.now() - date_reported).days
-
-    # Mesh detection
-    mesh = False
-    building = "0"
-    apt = unit
-
-    if "-" in unit:
-        parts = unit.split("-")
-        if len(parts) >= 2:
-            building = parts[0]
-            apt = parts[1]
-
-    nn = 0
-    for install in all_active_installs:
-        for k, v in install_to_building_map.items():
-            if v == int(building):
-                nn = k
-                break
-
-        try:
-            if int(install["node"]["network_number"]) == nn:
-                if install["unit"].lower() == apt.lower():
-                    mesh = True
-                    break
-        except Exception as e:
-            print(e, file=sys.stderr)
-            continue
-
-    # Format output
-    display_resolved = date_resolved.strftime("%m/%d/%Y") if date_resolved else "Open"
+    try:
+        resolved = parser.parse(raw_resolved.strip()) if raw_resolved.strip() else None
+    except (ValueError, OverflowError):
+        resolved = None
 
     return {
-        "unit": unit,
-        "mesh": mesh,
-        "issue": issue,
-        "date_reported": date_reported.strftime("%m/%d/%Y"),
-        "date_resolved": display_resolved,
-        "wait": wait
+        "unit": unit.strip().replace(" ", ""),
+        "mesh": buildings.apartment_from_name(unit, buildings.in_group("gsg")) in active_apartments,
+        "issue": issue.strip(),
+        "date_reported": reported.strftime("%m/%d/%Y"),
+        "date_resolved": resolved.strftime("%m/%d/%Y") if resolved else "Open",
+        "wait": ((resolved or datetime.now()) - reported).days
     }
 
 @login_required
 def reports(request):
-    months = []
-    start_date = datetime(2022, 1, 1)  # Start from January 2022
-    current_date = datetime.now()  # Current date
-    current_year_month = (current_date.year, current_date.month)
-
-    # Iterate through months from start_date to the month before now
-    while (start_date.year, start_date.month) < current_year_month:
-        months.append({
-            'value': start_date.strftime("%Y%m"),  # Format as "YYYYMM"
-            'formatted': start_date.strftime("%B %Y")  # Format as "Month Year"
-        })
-        # Increment the date by one month
-        next_month = start_date.month % 12 + 1
-        next_year = start_date.year + (1 if start_date.month == 12 else 0)
-        start_date = start_date.replace(year=next_year, month=next_month)
-
+    months = report_months()
     report = {}
     support = []
     stats = {}
-    error_message = None # New variable to pass errors to template
+    error_message = None
 
     if request.method == 'POST':
         form = ReportForm(request.POST, request.FILES)
-        
+
         if form.is_valid():
             value = form.cleaned_data['report']
-            action = request.POST.get('action')
+            year, month = int(value[:4]), int(value[4:])
 
-            formatted = None
-            for month in months:
-                if month['value'] == value:
-                    formatted = month['formatted']
-
-            installs = fetch_all_installs(ALLOWED_NETWORK_NUMBERS)
-            current_installs = []
-            all_active_installs = []
-
-            # Parse the year and month from the value
-            selected_year = current_year = int(value[:4])
-            selected_month = current_month = int(value[4:])
-            current_date = datetime(current_year, current_month, 1)
-
-            # Generate the date ranges and formatted month names
-            date_ranges = [(current_date.year, current_date.month)]
-            written_months = [current_date.strftime("%B")]  # Start with the current month name
-
-            for _ in range(4):  # Add the past 4 months
-                current_date = (current_date.replace(day=1) - timedelta(days=1))
-                date_ranges.append((current_date.year, current_date.month))
-                written_months.append(current_date.strftime("%B"))
-
-            # Generate years and written_years for current and past 3 years
-            written_years = [str(current_year)]  # Start with the current year
-            for _ in range(3):  # Add the past 3 years
-                current_year -= 1
-                written_years.append(str(current_year))
-
-            # Initialize variables to store the counts
-            completed_installs = defaultdict(int)
-            pending_installs = defaultdict(int)
-            no_reply_installs = defaultdict(int)
-            uninstalled_installs = defaultdict(int)
-
-            # Totals for years and all-time
-            yearly_totals = defaultdict(lambda: defaultdict(int))
-            all_time_totals = defaultdict(int)
-
-            # Loop through the installs and categorize them
-            for install in installs:
-                install_date = datetime.strptime(install['install_date'], "%Y-%m-%d") if install['install_date'] else None
-                try:
-                    request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%S.%fZ")
-                except ValueError:
-                    request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%SZ")
-                abandon_date = datetime.strptime(install['abandon_date'], "%Y-%m-%d") if install['abandon_date'] else None
-
-                # Yearly and all-time calculations
-                def update_totals(category, date):
-                    if date:
-                        yearly_totals[category][date.year] += 1
-                        all_time_totals[category] += 1
-
-                # Completed installs
-                if install_date and install['status'] == "Active":
-                    update_totals("completed", install_date)
-
-                # Pending installs
-                if request_date and install['status'] == "Request Received":
-                    update_totals("pending", request_date)
-
-                # No reply installs
-                if request_date and install['status'] == "Closed" and not abandon_date:
-                    update_totals("no_reply", request_date)
-
-                # Uninstalled installs
-                if abandon_date and install['status'] == "Closed":
-                    update_totals("uninstalled", abandon_date)
-
-                # Monthly counts
-                for year, month in date_ranges:
-                    if install_date and install['status'] == "Active" and install_date.year == year and install_date.month == month:
-                        completed_installs[(year, month)] += 1
-                        if month is date_ranges[0][1]:
-                            current_installs.append(install)
-                    elif install_date and install['status'] == "Active":
-                        all_active_installs.append(install)
-                    elif request_date and install['status'] == "Request Received" and request_date.year == year and request_date.month == month:
-                        pending_installs[(year, month)] += 1
-                    elif request_date and install['status'] == "Closed" and not abandon_date and request_date.year == year and request_date.month == month:
-                        no_reply_installs[(year, month)] += 1
-                    elif abandon_date and install['status'] == "Closed" and abandon_date.year == year and abandon_date.month == month:
-                        uninstalled_installs[(year, month)] += 1
-
-                # Build the yearly totals for each category
-                completed_installs_years = [
-                    yearly_totals["completed"][year] for year in range(current_date.year - 3, current_date.year + 1)
-                ]
-                pending_installs_years = [
-                    yearly_totals["pending"][year] for year in range(current_date.year - 3, current_date.year + 1)
-                ]
-                no_reply_installs_years = [
-                    yearly_totals["no_reply"][year] for year in range(current_date.year - 3, current_date.year + 1)
-                ]
-                uninstalled_installs_years = [
-                    yearly_totals["uninstalled"][year] for year in range(current_date.year - 3, current_date.year + 1)
-                ]
-
-                # All-time totals for each category
-                completed_installs_all_time = all_time_totals["completed"]
-                pending_installs_all_time = all_time_totals["pending"]
-                no_reply_installs_all_time = all_time_totals["no_reply"]
-                uninstalled_installs_all_time = all_time_totals["uninstalled"]
-
-            response_meanwait = 0
-            response_weekwait = 0
-            for install in current_installs:
-                install_date = datetime.strptime(install['install_date'], "%Y-%m-%d") if install['install_date'] else None
-                try:
-                    request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%S.%fZ")
-                except ValueError:
-                    request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%SZ")
-                wait = (install_date - request_date.replace(hour=0, minute=0, second=0, microsecond=0)).days
-                response_meanwait += wait
-                if wait > 7:
-                    response_weekwait += 1
-            if len(current_installs) > 0:
-                response_meanwait = round(response_meanwait / len(current_installs), 2)
-                response_shortwait = len(current_installs) - response_weekwait
-                response_percent = int((response_shortwait / len(current_installs)) * 100)
-            else:
-                response_shortwait = 0
-                response_percent = 0
-
-            # Build the report dictionary
+            installs = fetch_installs(buildings.in_group("gsg"))
             report = {
                 "value": value,
-                "formatted": formatted,
-
-                "written_months": written_months,
-                "completed_installs": [completed_installs[date] for date in date_ranges],
-                "pending_installs": [pending_installs[date] for date in date_ranges],
-                "no_reply_installs": [no_reply_installs[date] for date in date_ranges],
-                "uninstalled_installs": [uninstalled_installs[date] for date in date_ranges],
-
-                "written_years": written_years,
-                "completed_installs_years": completed_installs_years,
-                "pending_installs_years": pending_installs_years,
-                "no_reply_installs_years": no_reply_installs_years,
-                "uninstalled_installs_years": uninstalled_installs_years,
-                "completed_installs_all_time": completed_installs_all_time,
-                "pending_installs_all_time": pending_installs_all_time,
-                "no_reply_installs_all_time": no_reply_installs_all_time,
-                "uninstalled_installs_all_time": uninstalled_installs_all_time,
-
-                "response_meanwait": response_meanwait,
-                "response_weekwait": response_weekwait,
-                "response_shortwait": response_shortwait,
-                "response_percent": response_percent
+                "formatted": next((m['formatted'] for m in months if m['value'] == value), None),
+                **install_report(installs, year, month)
             }
 
-            # ---------------------------------------------------------
-            #  SUPPORT DATA HANDLING (File Upload OR Google Sheets)
-            # ---------------------------------------------------------
-            
-            mesh_count = 0
-            internet_count = 0
-            avg_wait = 0
-
-            # OPTION A: File Upload (CSV)
-            # ---------------------------
+            # Support visits come from either an uploaded CSV (Unit, Issue, Reported, Resolved;
+            # every row is used) or the published Google Sheet (ID, Apartment, Issue, Reported By,
+            # Reported, Resolved; only rows reported in the selected month)
+            rows = []
             if request.FILES:
-                support_file = request.FILES['file'].read().decode("utf-8-sig")
-                lines = support_file.splitlines()
-                reader = csv.reader(lines, delimiter=',')
-                next(reader) # Skip header
+                reader = csv.reader(request.FILES['file'].read().decode("utf-8-sig").splitlines())
+                next(reader, None)
+                rows = [(row + [""] * 4)[:4] + [None, None] for row in reader if row]
+            elif request.POST.get('action') == 'google_sheets':
+                sheet = clients.fetch_support_sheet()
+                if sheet is None:
+                    error_message = "Couldn't download the support sheet from Google Sheets."
+                else:
+                    rows = [[row[1], row[2], row[4], row[5], year, month] for row in (r + [""] * 6 for r in sheet) if row[0]]
 
-                for row in reader:
-                    if not row: continue
-                    
-                    # CSV format expected:
-                    # 0: Unit, 1: Issue, 2: Reported, 3: Resolved
-                    # (Assuming User's provided CSV structure)
-                    unit = row[0]
-                    issue = row[1]
-                    raw_date_reported = row[2]
-                    raw_date_resolved = row[3]
+            active_apartments = {buildings.apartment_key(i) for i in installs if i['status'] == "Active"} - {None}
+            for unit, issue, raw_reported, raw_resolved, filter_year, filter_month in rows:
+                visit = support_visit(unit, issue, raw_reported, raw_resolved, active_apartments, filter_year, filter_month)
+                if visit:
+                    support.append(visit)
 
-                    visit = process_support_row(
-                        unit, issue, raw_date_reported, raw_date_resolved, 
-                        all_active_installs, install_to_building_map
-                    )
-
-                    if visit:
-                        support.append(visit)
-                        if visit['mesh']: mesh_count += 1
-                        avg_wait += visit['wait']
-                        issue_text = visit["issue"].lower()
-                        if any(keyword in issue_text for keyword in internet_keywords):
-                            internet_count += 1
-
-            # OPTION B: Google Sheets (SIMPLE PUBLISHED CSV)
-            # -----------------------
-            elif action == 'google_sheets':
-                try:
-                    if not GOOGLE_SHEET_CSV_URL:
-                        raise Exception("Missing GOOGLE_SHEET_CSV_URL environment variable")
-
-                    # Download the published CSV
-                    response = requests.get(GOOGLE_SHEET_CSV_URL)
-                    response.raise_for_status() # Raise error if download failed
-                    
-                    # Decode the bytes to string and split into lines
-                    lines = response.content.decode('utf-8').splitlines()
-                    reader = csv.reader(lines)
-                    
-                    # Skip Header
-                    next(reader) 
-
-                    for row in reader:
-                        if not row or not row[0]: continue
-                        
-                        # Google Sheet format expected:
-                        # 0: ID, 1: Apt, 2: Issue, 3: Reported By, 4: Reported, 5: Resolved
-                        unit = row[1]
-                        issue = row[2]
-                        raw_date_reported = row[4]
-                        raw_date_resolved = row[5]
-
-                        visit = process_support_row(
-                            unit, issue, raw_date_reported, raw_date_resolved, 
-                            all_active_installs, install_to_building_map,
-                            selected_year, selected_month
-                        )
-
-                        if visit:
-                            support.append(visit)
-                            if visit['mesh']: mesh_count += 1
-                            avg_wait += visit['wait']
-                            issue_text = visit["issue"].lower()
-                            if any(keyword in issue_text for keyword in internet_keywords):
-                                internet_count += 1
-                            
-                except Exception as e:
-                    error_message = f"Error connecting to Google Sheets: {e}"
-
-            # Calculate Statistics if support data exists
-            if len(support) > 0:
+            if support:
                 stats = {
                     "visits": len(support),
-                    "percent_mesh": int((mesh_count / len(support)) * 100),
-                    "percent_internet": int((internet_count / len(support)) * 100),
-                    "avg_wait": round(avg_wait / len(support), 2)
+                    "percent_mesh": int(sum(v['mesh'] for v in support) / len(support) * 100),
+                    "percent_internet": int(sum(any(k in v['issue'].lower() for k in INTERNET_KEYWORDS) for v in support) / len(support) * 100),
+                    "avg_wait": round(sum(v['wait'] for v in support) / len(support), 2)
                 }
-            else:
+            elif not error_message:
                 error_message = "No support information to be displayed!"
-    
-    # NOTE: We are passing 'error_message' to the template. 
-    # Ensure your template can display {{ error_message }} if it's not None.
+
     return render(request, 'dashboard/gsg-reports.html', {
         'months': months,
         'report': report,
         'support': support,
         'stats': stats,
-        'error_message': error_message 
+        'error_message': error_message
     })
 
 @login_required
@@ -416,7 +182,7 @@ def billing(request):
     this_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     billable = buildings.billable()
-    installs = fetch_all_installs([b.network_number for b in billable])
+    installs = fetch_installs(billable)
 
     # Everything on this page is counted by apartment (see buildings.apartment_key), so the
     # active counts and the monthly table agree on what a unit is.

@@ -145,28 +145,28 @@
                     <tbody>
                       <tr>
                         <td>Installed</td>
-                        {% for value in report.completed_installs_years reversed %}
+                        {% for value in report.completed_installs_years %}
                           <td>{{ value }}</td>
                         {% endfor %}
                         <td>{{ report.completed_installs_all_time }}</td>
                       </tr>
                       <tr>
                         <td>Pending</td>
-                        {% for value in report.pending_installs_years reversed %}
+                        {% for value in report.pending_installs_years %}
                           <td>{{ value }}</td>
                         {% endfor %}
                         <td>{{ report.pending_installs_all_time }}</td>
                       </tr>
                       <tr>
                         <td>No Reply</td>
-                        {% for value in report.no_reply_installs_years reversed %}
+                        {% for value in report.no_reply_installs_years %}
                           <td>{{ value }}</td>
                         {% endfor %}
                         <td>{{ report.no_reply_installs_all_time }}</td>
                       </tr>
                       <tr>
                         <td>Unenrolled</td>
-                        {% for value in report.uninstalled_installs_years reversed %}
+                        {% for value in report.uninstalled_installs_years %}
                           <td>{{ value }}</td>
                         {% endfor %}
                         <td>{{ report.uninstalled_installs_all_time }}</td>
