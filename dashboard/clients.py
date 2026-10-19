@@ -4,6 +4,7 @@ Clients for the services the dashboard reads from: MeshDB, UISP, Stripe and Invo
 Every request has a timeout, and a failed request returns None instead of raising,
 so one service being down doesn't take the whole page with it.
 """
+import csv
 import logging
 import os
 import re
@@ -28,6 +29,7 @@ MESHDB_API_KEY = os.environ.get("MESHDB_API_KEY", "")
 UISP_API_KEY = os.environ.get("UISP_API_KEY", "")
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
 NINJA_API_KEY = os.environ.get("NINJA_API_KEY", "")
+GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "")
 
 DISPLAY_TIME = "%B %d, %Y %I:%M %p"
 
@@ -153,3 +155,19 @@ def fetch_ninja_invoices(client_id):
         'reminder3_sent': invoice['reminder3_sent'],
         'next_send_date': invoice['next_send_date']
     } for invoice in data['data']]
+
+# Google Sheets
+
+def fetch_support_sheet():
+    """Rows of the published GSG support log (header skipped), or None if it can't be downloaded."""
+    if not GOOGLE_SHEET_CSV_URL:
+        log.warning("GOOGLE_SHEET_CSV_URL is not set")
+        return None
+    try:
+        response = requests.get(GOOGLE_SHEET_CSV_URL, timeout=TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        # The URL itself is a secret, so it isn't logged
+        log.warning("Support sheet download failed: %s", type(e).__name__)
+        return None
+    return list(csv.reader(response.content.decode('utf-8').splitlines()))[1:]
