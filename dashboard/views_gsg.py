@@ -1,4 +1,3 @@
-import csv
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -7,7 +6,6 @@ from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
 
 from . import buildings, clients
-from .forms import ReportForm
 
 REPORT_START = datetime(2022, 1, 1)
 
@@ -117,56 +115,44 @@ def support_visit(unit, issue, raw_reported, raw_resolved, active_apartments, ye
 
 @login_required
 def reports(request):
+    """The status report for ?month=YYYYMM, defaulting to the last full month, with support visits from the Google Sheet."""
     months = report_months()
-    report = {}
+    value = request.GET.get("month")
+    if value not in {m['value'] for m in months}:
+        value = months[-1]['value']
+    year, month = int(value[:4]), int(value[4:])
+
+    installs = fetch_installs(buildings.in_group("gsg"))
+    report = {
+        "value": value,
+        "formatted": next(m['formatted'] for m in months if m['value'] == value),
+        **install_report(installs, year, month)
+    }
+
+    # Support log columns: ID, Apartment, Issue, Reported By, Date Reported, Date Resolved
     support = []
     stats = {}
     error_message = None
-
-    if request.method == 'POST':
-        form = ReportForm(request.POST, request.FILES)
-
-        if form.is_valid():
-            value = form.cleaned_data['report']
-            year, month = int(value[:4]), int(value[4:])
-
-            installs = fetch_installs(buildings.in_group("gsg"))
-            report = {
-                "value": value,
-                "formatted": next((m['formatted'] for m in months if m['value'] == value), None),
-                **install_report(installs, year, month)
-            }
-
-            # Support visits come from either an uploaded CSV (Unit, Issue, Reported, Resolved;
-            # every row is used) or the published Google Sheet (ID, Apartment, Issue, Reported By,
-            # Reported, Resolved; only rows reported in the selected month)
-            rows = []
-            if request.FILES:
-                reader = csv.reader(request.FILES['file'].read().decode("utf-8-sig").splitlines())
-                next(reader, None)
-                rows = [(row + [""] * 4)[:4] + [None, None] for row in reader if row]
-            elif request.POST.get('action') == 'google_sheets':
-                sheet = clients.fetch_support_sheet()
-                if sheet is None:
-                    error_message = "Couldn't download the support sheet from Google Sheets."
-                else:
-                    rows = [[row[1], row[2], row[4], row[5], year, month] for row in (r + [""] * 6 for r in sheet) if row[0]]
-
-            active_apartments = {buildings.apartment_key(i) for i in installs if i['status'] == "Active"} - {None}
-            for unit, issue, raw_reported, raw_resolved, filter_year, filter_month in rows:
-                visit = support_visit(unit, issue, raw_reported, raw_resolved, active_apartments, filter_year, filter_month)
+    sheet = clients.fetch_support_sheet()
+    if sheet is None:
+        error_message = "Couldn't download the support sheet from Google Sheets."
+    else:
+        active_apartments = {buildings.apartment_key(i) for i in installs if i['status'] == "Active"} - {None}
+        for row in (r + [""] * 6 for r in sheet):
+            if row[0]:
+                visit = support_visit(row[1], row[2], row[4], row[5], active_apartments, year, month)
                 if visit:
                     support.append(visit)
 
-            if support:
-                stats = {
-                    "visits": len(support),
-                    "percent_mesh": int(sum(v['mesh'] for v in support) / len(support) * 100),
-                    "percent_internet": int(sum(any(k in v['issue'].lower() for k in INTERNET_KEYWORDS) for v in support) / len(support) * 100),
-                    "avg_wait": round(sum(v['wait'] for v in support) / len(support), 2)
-                }
-            elif not error_message:
-                error_message = "No support information to be displayed!"
+        if support:
+            stats = {
+                "visits": len(support),
+                "percent_mesh": int(sum(v['mesh'] for v in support) / len(support) * 100),
+                "percent_internet": int(sum(any(k in v['issue'].lower() for k in INTERNET_KEYWORDS) for v in support) / len(support) * 100),
+                "avg_wait": round(sum(v['wait'] for v in support) / len(support), 2)
+            }
+        else:
+            error_message = f"No support visits were reported in {report['formatted']}."
 
     return render(request, 'dashboard/gsg-reports.html', {
         'months': months,

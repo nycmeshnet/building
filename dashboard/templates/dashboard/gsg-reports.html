@@ -47,43 +47,59 @@
         .cover img {
             width: 150px;
         }
+        @media print {
+            @page {
+                size: letter;
+                margin: 0.5in;
+            }
+            body {
+                padding: 0 !important;
+            }
+            .no-print {
+                display: none !important;
+            }
+            .page {
+                width: auto;
+            }
+            /* Cover fills the first sheet; the report data starts on the second */
+            #page-1 {
+                display: flex;
+                height: 9.9in;
+                align-items: center;
+                justify-content: center;
+                break-after: page;
+            }
+            .cover {
+                position: static;
+                transform: none;
+            }
+        }
     </style>
 </head>
 {% load static %}
 {% load tz %}
 <body class="p-3">
-    <h1>GSG Dashboard - Reports</h1>
+    <h1 class="no-print">GSG Dashboard - Reports</h1>
     <div class="column">
-        <form id="form" method="post" class="form-inline" enctype="multipart/form-data">
-            {% csrf_token %}
+        <div class="no-print">
             <div>
-                <div>
-                    <select id="query" name="report" class="form-control">
-                        {% for date in months reversed %}
-                        <option value="{{ date.value }}">{{ date.formatted }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                <div class="col">
-                    <button type="submit" name="action" value="generate" class="btn btn-secondary mb-2">Generate</button>
-                    
-                    <input type="file" name="file" id="fileInput" style="display: none;">
-                    <button type="button" class="btn btn-secondary mb-2" id="uploadButton">Generate with CSV File</button>
-
-                    <button type="submit" name="action" value="google_sheets" class="btn btn-success mb-2" style="background-color: #0f9d58; border-color: #0f9d58; color: white;">Generate with Google Sheets</button>
-
-                    {% if report %}
-                      <button type="button" class="btn btn-warning mb-2" onclick="printReport()">Print Report</button>
-                    {% endif %}
-                    <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/'">Switch to Dashboard</button>
-                    <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/billing/'">Switch to Billing</button>
-                    <br>
-                    {% if error_message %}
-                        <p style="color: red">{{ error_message }}</p>
-                    {% endif %}
-                </div>
+                <select id="month" class="form-control" onchange="location.href = '?month=' + this.value">
+                    {% for date in months reversed %}
+                    <option value="{{ date.value }}" {% if date.value == report.value %}selected{% endif %}>{{ date.formatted }}</option>
+                    {% endfor %}
+                </select>
             </div>
-        </form>
+            <div class="col">
+                <button type="button" class="btn btn-success mb-2" onclick="location.href = location.pathname + location.search">Refresh</button>
+                <button type="button" class="btn btn-warning mb-2" onclick="printReport()">Print Report</button>
+                <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/'">Switch to Dashboard</button>
+                <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/billing/'">Switch to Billing</button>
+                <br>
+                {% if error_message %}
+                    <p style="color: red">{{ error_message }}</p>
+                {% endif %}
+            </div>
+        </div>
         {% if report %}
             <div class="page" id="page-1">
                 <div class="cover">
@@ -235,47 +251,12 @@
             </div>
         {% endif %}
     <script type="text/javascript">
-        const uploadButton = document.getElementById('uploadButton');
-        const fileInput = document.getElementById('fileInput');
-        var form = document.getElementById("form");
-
-        uploadButton.addEventListener('click', () => {
-            fileInput.click();
-        });
-
-        fileInput.addEventListener('change', (event) => {
-            const file = event.target.files[0];
-            form.submit()
-        });
-
+        // Print styles in <head> lay out the cover and report pages; the title becomes the PDF's file name
         function printReport() {
-          var printBootstrap = document.getElementById("bootstrap").outerHTML;
-          var printStyle = document.getElementById("style").outerHTML;
-          var printPage1 = document.getElementById("page-1").innerHTML;
-          var printPage2 = document.getElementById("page-2").innerHTML;
-          var w = window.open("", "_blank");
-          w.document.write(`
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>NYC Mesh @ Grand Street Guild {{ report.formatted }} Status Report</title>
-            ${printBootstrap}
-            ${printStyle}
-          </head>
-          <body>
-            <div style="height: 10in">
-              ${printPage1}
-            </div>
-            <div style="height: 10in">
-              ${printPage2}
-            </div>
-          </body>
-          </html>
-        `);
-        w.document.close(); // Close the document to complete writing
-        w.focus(); // Focus on the new window
-        w.print(); // Trigger print
-        w.close(); // Close the window after printing
+            const title = document.title;
+            document.title = "NYC Mesh @ Grand Street Guild {{ report.formatted }} Status Report";
+            window.print();
+            document.title = title;
         }
     </script>
 </body>
