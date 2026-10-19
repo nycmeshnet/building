@@ -1,6 +1,10 @@
+import logging
+
 from .settings import TOKEN_ID_COOKIE, SESSION_COOKIE_DOMAIN
 from django.utils.deprecation import MiddlewareMixin
 from mozilla_django_oidc.auth import OIDCAuthenticationBackend
+
+log = logging.getLogger(__name__)
 
 class TokenCookieMiddleWare(MiddlewareMixin):
     """
@@ -16,7 +20,7 @@ class TokenCookieMiddleWare(MiddlewareMixin):
             secure=True, httponly=True, samesite="Lax")
 
         elif not request.user.is_authenticated and request.COOKIES.get(TOKEN_ID_COOKIE):
-            print('Remove cookie')
+            log.debug("Removing token cookie for logged-out user")
             #else if if no user and cookie remove user cookie, logout
             response.delete_cookie(TOKEN_ID_COOKIE, domain=SESSION_COOKIE_DOMAIN)
         return response
