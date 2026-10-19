@@ -53,26 +53,34 @@
             <button type="button" class="btn btn-primary mb-2" onclick="location.href = '/gsg/reports/'">Switch to Reports</button>
         </div>
         <h2>Active Installs</h2>
-        <<ul>
+        <ul>
+            {% for building in buildings %}
             <li>
-                410: {{ active_410 }}
-                {% if dupes_410 %}
-                    (Duplicates: {{ dupes_410 }})
+                {{ building.name }}: {{ building.active }}
+                {% if building.duplicates %}
+                    (Duplicates: {{ building.duplicates }})
                 {% endif %}
             </li>
-            <li>
-                460: {{ active_460 }}
-                {% if dupes_460 %}
-                    (Duplicates: {{ dupes_460 }})
-                {% endif %}
-            </li>
-            <li>
-                131: {{ active_131 }}
-                {% if dupes_131 %}
-                    (Duplicates: {{ dupes_131 }})
-                {% endif %}
-            </li>
+            {% endfor %}
             <li>Total Active: {{ active_total }}</li>
+        </ul>
+        <h2>Reconciliation</h2>
+        <p>
+            {{ total }} apartments installed since January 2022
+            &minus; {{ no_longer_active|length }} no longer active
+            + {{ active_not_billed|length }} active but not in the table
+            = {{ active_total }} active
+        </p>
+        <ul>
+            {% if no_longer_active %}
+            <li>No longer active: {{ no_longer_active|join:", " }}</li>
+            {% endif %}
+            {% if active_not_billed %}
+            <li>Active but not in the table (installed this month, before 2022, or missing an install date): {{ active_not_billed|join:", " }}</li>
+            {% endif %}
+            {% if excluded %}
+            <li>Not counted anywhere (unit isn't an apartment): {{ excluded|join:", " }}</li>
+            {% endif %}
         </ul>
         <table>
             <thead>
@@ -87,11 +95,7 @@
                 <tr>
                     <td>{{ month.formatted }}</td>
                     <td>{{ month.count }}</td>
-                    <td>
-                        {% for install in month.installs %}
-                            {{ install.apt }}{% if not forloop.last %}, {% endif %}
-                        {% endfor %}
-                    </td>
+                    <td>{{ month.apartments|join:", " }}</td>
                 </tr>
                 {% endfor %}
                 <tr>

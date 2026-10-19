@@ -315,38 +315,27 @@ def fetch_all_installs(network_numbers):
                 installs.append(install)
     return installs
 
-def is_valid_unit(unit):
-    if not unit:
-        return False
-
-    unit = unit.strip().lower()
-
-    # Reject obvious non-units
-    invalid_keywords = [
-        "ap", "access", "community", "ground",
-        "north", "south", "east", "west",
-        "none", "floor"
-    ]
-
-    if any(word in unit for word in invalid_keywords):
-        return False
-
-    return bool(re.match(r'^(apt\.?\s*)?\d+[a-z]$', unit))
-
-def normalize_unit(unit):
-    if not unit:
+def apartment_key(install):
+    """
+    Return the billable apartment for an install as "BUILDING-UNIT" (e.g. "410-14B"),
+    or None if it isn't in a GSG building or its unit isn't a real apartment (APs, roof, typos).
+    Units are normalized, so "APT 14B", "06D" and "18 H" become "14B", "6D" and "18H".
+    """
+    network_number = (install.get('node') or {}).get('network_number')
+    building = install_to_building_map.get(network_number)
+    if not building:
         return None
 
-    unit = unit.strip().upper()
+    unit = re.sub(r'APARTMENT|APT\.?|#|\s', '', (install.get('unit') or '').upper())
+    match = re.fullmatch(r'0*(\d+)([A-Z])', unit)
+    if not match:
+        return None
 
-    # Remove leading zero (06D → 6D)
-    if unit.startswith("0"):
-        unit = unit[1:]
+    floor, letter = int(match[1]), match[2]
+    if floor not in install_to_floor_map[network_number] or letter not in alphabet[:install_to_unit_map[network_number]]:
+        return None
 
-    # Remove "APT", "APT.", etc.
-    unit = unit.replace("APT.", "").replace("APT", "").strip()
-
-    return unit
+    return f"{building}-{floor}{letter}"
 
 def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
     if not raw_date_reported:
@@ -813,95 +802,72 @@ def reports(request):
 
 @login_required
 def billing(request):
-    months = []
-    start_date = datetime(2022, 1, 1)
-    current_date = datetime.now()
-    current_year_month = (current_date.year, current_date.month)
+    first_month = datetime(2022, 1, 1)
+    this_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     installs = fetch_all_installs(ALLOWED_NETWORK_NUMBERS_3)
 
-    installed = []
+    # Everything on this page is counted by apartment (see apartment_key), so the
+    # active counts and the monthly table agree on what a unit is.
+    active_counts = defaultdict(int)  # apartment -> number of Active installs
+    first_installed = {}              # apartment -> earliest install date in the billing window
+    excluded = []                     # installs whose unit isn't a recognizable apartment
 
-    # Active counts per building
-    active_410 = 0
-    active_460 = 0
-    active_131 = 0
-
-    unit_counts_410 = defaultdict(int)
-    unit_counts_460 = defaultdict(int)
-    unit_counts_131 = defaultdict(int)
-    
     for install in installs:
-        if install.get("status") == "Active":
-            unit = install.get("unit")
-    
-            if not is_valid_unit(unit):
-                continue
-    
-            norm_unit = normalize_unit(unit)
-            net = install["node"]["network_number"]
-    
-            if net == 1932:
-                active_410 += 1
-                unit_counts_410[norm_unit] += 1
-            elif net == 1933:
-                active_460 += 1
-                unit_counts_460[norm_unit] += 1
-            elif net == 1934:
-                active_131 += 1
-                unit_counts_131[norm_unit] += 1
-    
-    dupes_410 = ", ".join(sorted([u for u, c in unit_counts_410.items() if c > 1]))
-    dupes_460 = ", ".join(sorted([u for u, c in unit_counts_460.items() if c > 1]))
-    dupes_131 = ", ".join(sorted([u for u, c in unit_counts_131.items() if c > 1]))
-    
-    while (start_date.year, start_date.month) < current_year_month:
-        month_installs = []
+        apt = apartment_key(install)
+        install_date = datetime.strptime(install['install_date'], "%Y-%m-%d") if install.get('install_date') else None
+        is_active = install.get('status') == "Active"
 
-        for install in installs:
-            install_date = datetime.strptime(install['install_date'], "%Y-%m-%d") if install['install_date'] else None
-            try:
-                request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%S.%fZ")
-            except ValueError:
-                request_date = datetime.strptime(install['request_date'], "%Y-%m-%dT%H:%M:%SZ")
-            abandon_date = datetime.strptime(install['abandon_date'], "%Y-%m-%d") if install['abandon_date'] else None
+        if not apt:
+            if is_active or install_date:
+                network_number = (install.get('node') or {}).get('network_number')
+                excluded.append(f"{install_to_building_map.get(network_number, network_number)} \"{install.get('unit')}\" ({install.get('status')})")
+            continue
 
-            if install_date and install_date.year == start_date.year and install_date.month == start_date.month:
-                if install['unit'][0] == "0":
-                    install['unit'] = install['unit'][1:]
-                new_install = ""
+        if is_active:
+            active_counts[apt] += 1
+        if install_date and first_month <= install_date < this_month:
+            if apt not in first_installed or install_date < first_installed[apt]:
+                first_installed[apt] = install_date
 
-                if install['node']['network_number'] == 1932:
-                    new_install = "410-" + install['unit'].upper()
-                if install['node']['network_number'] == 1933:
-                    new_install = "460-" + install['unit'].upper()
-                if install['node']['network_number'] == 1934:
-                    new_install = "131-" + install['unit'].upper()
-                
-                if new_install not in installed:
-                    installed.append(new_install)
-                    install['apt'] = new_install
-                    month_installs.append(install)
-       
+    building_order = [str(install_to_building_map[nn]) for nn in ALLOWED_NETWORK_NUMBERS_3]
+    def apt_sort(apt):
+        building, unit = apt.split("-")
+        return (building_order.index(building), int(unit[:-1]), unit[-1])
+
+    months = []
+    month = first_month
+    while month < this_month:
+        apartments = sorted(
+            (apt for apt, date in first_installed.items() if (date.year, date.month) == (month.year, month.month)),
+            key=apt_sort
+        )
         months.append({
-            'value': start_date.strftime("%Y%m"),
-            'formatted': start_date.strftime("%B %Y"),
-            'count': len(month_installs),
-            'installs': month_installs
+            'value': month.strftime("%Y%m"),
+            'formatted': month.strftime("%B %Y"),
+            'count': len(apartments),
+            'apartments': apartments
+        })
+        month = month.replace(year=month.year + month.month // 12, month=month.month % 12 + 1)
+
+    buildings = []
+    for building in building_order:
+        apts = [apt for apt in active_counts if apt.startswith(f"{building}-")]
+        buildings.append({
+            'name': building,
+            'active': len(apts),
+            'duplicates': ", ".join(apt.split("-")[1] for apt in sorted(apts, key=apt_sort) if active_counts[apt] > 1)
         })
 
-        next_month = start_date.month % 12 + 1
-        next_year = start_date.year + (1 if start_date.month == 12 else 0)
-        start_date = start_date.replace(year=next_year, month=next_month)
+    active = set(active_counts)
+    billed = set(first_installed)
 
     return render(request, 'dashboard/gsg-billing.html', {
         'months': months,
-        'total': len(installed),
-        'active_410': active_410,
-        'active_460': active_460,
-        'active_131': active_131,
-        'active_total': active_410 + active_460 + active_131,
-        'dupes_410': dupes_410,
-        'dupes_460': dupes_460,
-        'dupes_131': dupes_131
+        'total': len(billed),
+        'buildings': buildings,
+        'active_total': len(active),
+        'no_longer_active': sorted(billed - active, key=apt_sort),
+        'active_not_billed': sorted(active - billed, key=apt_sort),
+        'excluded': excluded
     })
