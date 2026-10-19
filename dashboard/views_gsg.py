@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
 from .forms import LookupForm, ReportForm
+from . import buildings
 from dotenv import load_dotenv
 from collections import defaultdict
 
@@ -34,34 +35,14 @@ headers = {
     'Authorization': f'Token {MESHDB_API_KEY}'
 }
 
-ALLOWED_NETWORK_NUMBERS = [1932, 1933, 1934, 1936]
-ALLOWED_NETWORK_NUMBERS_3 = [1932, 1933, 1934]
-DEVICE_PARENT_IDS = {
-    1932: 'a57ddde1-6fff-463a-bbee-cbe90258daa6',
-    #1933: '7e6d228f-2693-4ba2-9c0a-82811289f9f3',
-    1933: '7ee45009-6bc2-4a26-9b83-a3b07c70a3f6',
-    1934: '7ee45009-6bc2-4a26-9b83-a3b07c70a3f6',
-    1936: '4a6f43ed-ac8b-41c6-867b-e893d9737c31'
-}
-install_to_building_map = {
-    1932: 410,
-    1933: 460,
-    1934: 131,
-    1936: 165
-}
-install_to_floor_map = {
-    1932: range(2,27),
-    1933: range(2,27),
-    1934: range(2,27),
-    1936: range(3,16)
-}
-install_to_unit_map = {
-    1932: 8,
-    1933: 8,
-    1934: 8,
-    1936: 18
-}
-alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+# Derived from buildings.py until the views below are moved onto it directly
+GSG_BUILDINGS = buildings.in_group("gsg")
+ALLOWED_NETWORK_NUMBERS = [b.network_number for b in GSG_BUILDINGS]
+DEVICE_PARENT_IDS = {b.network_number: b.uisp_parent_id for b in GSG_BUILDINGS}
+install_to_building_map = {b.network_number: b.number for b in GSG_BUILDINGS}
+install_to_floor_map = {b.network_number: b.floors for b in GSG_BUILDINGS}
+install_to_unit_map = {b.network_number: b.units_per_floor for b in GSG_BUILDINGS}
+alphabet = buildings.ALPHABET
 
 internet_keywords = [
     "internet",
@@ -314,28 +295,6 @@ def fetch_all_installs(network_numbers):
             for install in data['results']:
                 installs.append(install)
     return installs
-
-def apartment_key(install):
-    """
-    Return the billable apartment for an install as "BUILDING-UNIT" (e.g. "410-14B"),
-    or None if it isn't in a GSG building or its unit isn't a real apartment (APs, roof, typos).
-    Units are normalized, so "APT 14B", "06D" and "18 H" become "14B", "6D" and "18H".
-    """
-    network_number = (install.get('node') or {}).get('network_number')
-    building = install_to_building_map.get(network_number)
-    if not building:
-        return None
-
-    unit = re.sub(r'APARTMENT|APT\.?|#|\s', '', (install.get('unit') or '').upper())
-    match = re.fullmatch(r'0*(\d+)([A-Z])', unit)
-    if not match:
-        return None
-
-    floor, letter = int(match[1]), match[2]
-    if floor not in install_to_floor_map[network_number] or letter not in alphabet[:install_to_unit_map[network_number]]:
-        return None
-
-    return f"{building}-{floor}{letter}"
 
 def process_support_row(unit, issue, raw_date_reported, raw_date_resolved, all_active_installs, install_to_building_map, filter_year=None, filter_month=None):
     if not raw_date_reported:
@@ -805,23 +764,24 @@ def billing(request):
     first_month = datetime(2022, 1, 1)
     this_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    installs = fetch_all_installs(ALLOWED_NETWORK_NUMBERS_3)
+    billable = buildings.billable()
+    installs = fetch_all_installs([b.network_number for b in billable])
 
-    # Everything on this page is counted by apartment (see apartment_key), so the
+    # Everything on this page is counted by apartment (see buildings.apartment_key), so the
     # active counts and the monthly table agree on what a unit is.
     active_counts = defaultdict(int)  # apartment -> number of Active installs
     first_installed = {}              # apartment -> earliest install date in the billing window
     excluded = []                     # installs whose unit isn't a recognizable apartment
 
     for install in installs:
-        apt = apartment_key(install)
+        apt = buildings.apartment_key(install)
         install_date = datetime.strptime(install['install_date'], "%Y-%m-%d") if install.get('install_date') else None
         is_active = install.get('status') == "Active"
 
         if not apt:
             if is_active or install_date:
-                network_number = (install.get('node') or {}).get('network_number')
-                excluded.append(f"{install_to_building_map.get(network_number, network_number)} \"{install.get('unit')}\" ({install.get('status')})")
+                building = buildings.BY_NETWORK_NUMBER.get((install.get('node') or {}).get('network_number'))
+                excluded.append(f"{building.number if building else '?'} \"{install.get('unit')}\" ({install.get('status')})")
             continue
 
         if is_active:
@@ -830,7 +790,7 @@ def billing(request):
             if apt not in first_installed or install_date < first_installed[apt]:
                 first_installed[apt] = install_date
 
-    building_order = [str(install_to_building_map[nn]) for nn in ALLOWED_NETWORK_NUMBERS_3]
+    building_order = [str(b.number) for b in billable]
     def apt_sort(apt):
         building, unit = apt.split("-")
         return (building_order.index(building), int(unit[:-1]), unit[-1])
@@ -850,10 +810,10 @@ def billing(request):
         })
         month = month.replace(year=month.year + month.month // 12, month=month.month % 12 + 1)
 
-    buildings = []
+    active_by_building = []
     for building in building_order:
         apts = [apt for apt in active_counts if apt.startswith(f"{building}-")]
-        buildings.append({
+        active_by_building.append({
             'name': building,
             'active': len(apts),
             'duplicates': ", ".join(apt.split("-")[1] for apt in sorted(apts, key=apt_sort) if active_counts[apt] > 1)
@@ -864,8 +824,9 @@ def billing(request):
 
     return render(request, 'dashboard/gsg-billing.html', {
         'months': months,
+        'first_month': first_month,
         'total': len(billed),
-        'buildings': buildings,
+        'buildings': active_by_building,
         'active_total': len(active),
         'no_longer_active': sorted(billed - active, key=apt_sort),
         'active_not_billed': sorted(active - billed, key=apt_sort),

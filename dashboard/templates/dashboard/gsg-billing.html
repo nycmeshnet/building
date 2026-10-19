@@ -66,7 +66,7 @@
         </ul>
         <h2>Reconciliation</h2>
         <p>
-            {{ total }} apartments installed since January 2022
+            {{ total }} apartments installed since {{ first_month|date:"F Y" }}
             &minus; {{ no_longer_active|length }} no longer active
             + {{ active_not_billed|length }} active but not in the table
             = {{ active_total }} active
