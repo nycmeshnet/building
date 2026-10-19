@@ -40,10 +40,9 @@ def onus_by_apartment(group_buildings, onus_by_parent):
     result = {}
     for building in group_buildings:
         for onu in onus_by_parent.get(building.uisp_parent_id) or []:
-            parsed = buildings.onu_apartment(onu['name'])
-            if not parsed or parsed[0] not in (building.number, building.network_number):
+            apt = buildings.apartment_from_name(onu['name'], [building])
+            if not apt:
                 continue
-            apt = f"{building.number}-{parsed[1]}{parsed[2]}"
             if apt not in result or (onu['status'] == ONLINE and result[apt]['status'] != ONLINE):
                 result[apt] = onu
     return result

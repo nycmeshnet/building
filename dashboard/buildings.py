@@ -75,13 +75,22 @@ GROUPS = {
     },
 }
 
-def onu_apartment(name):
+def parse_apartment(name):
     """
-    Return (prefix, floor, letter) from an ONU name, or None if it doesn't name an apartment.
-    Accepts "410-14B", "1936-03A" and names with trailing words like "165-9D New ONU".
-    The prefix is the building number or network number, depending on how the ONU was named.
+    Return (prefix, floor, letter) from an ONU name or support sheet unit, or None if it
+    doesn't name an apartment. Accepts "410-14B", "1936-03A", "410 - 14B" and names with
+    trailing words like "165-9D New ONU" or "410-14B (2 visits)". The prefix is the
+    building number or network number, depending on how the name was written.
     """
-    match = re.match(r'\s*(\d+)-0*(\d+)\s*([A-Za-z])\b', name or '')
+    match = re.match(r'\s*(\d+)\s*-\s*0*(\d+)\s*([A-Za-z])\b', name or '')
     if not match:
         return None
     return int(match[1]), int(match[2]), match[3].upper()
+
+def apartment_from_name(name, group_buildings):
+    """Return "BUILDING-UNIT" for a name (see parse_apartment) in one of the given buildings, or None."""
+    parsed = parse_apartment(name)
+    if not parsed:
+        return None
+    building = next((b for b in group_buildings if parsed[0] in (b.number, b.network_number)), None)
+    return f"{building.number}-{parsed[1]}{parsed[2]}" if building else None
