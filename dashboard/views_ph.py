@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
 from .forms import LookupForm, ReportForm
+from . import buildings
 from dotenv import load_dotenv
 from collections import defaultdict
 
@@ -31,10 +32,12 @@ headers = {
     'Authorization': f'Token {MESHDB_API_KEY}'
 }
 
-ALLOWED_NETWORK_NUMBER = 3461
-DEVICE_PARENT_ID = "cd815a56-612a-46a9-ae87-b80aab35730b"
-FLOORS = range(1,16)
-APARTMENTS = 'ABCDEFGHIJKL'
+# Derived from buildings.py until this view is merged with the GSG one
+PH_BUILDING = buildings.in_group("ph")[0]
+ALLOWED_NETWORK_NUMBER = PH_BUILDING.network_number
+DEVICE_PARENT_ID = PH_BUILDING.uisp_parent_id
+FLOORS = PH_BUILDING.floors
+APARTMENTS = PH_BUILDING.unit_letters
 
 def normalize_phone_number(phone):
     phone = phone.strip()
